@@ -60,6 +60,21 @@ if (process.argv.includes('--families')) {
   process.exit(0);
 }
 
+if (process.argv.includes('--docs')) {
+  let matched = 0;
+  for (let i = 680; i < cases.length; i++) {
+    const got = parse(sourceOf(cases[i]));
+    const want = expected[i];
+    if (got === want) { matched++; console.log(`${i}\tPASS`); continue; }
+    let p = 0;
+    const limit = Math.min(got.length, want.length);
+    while (p < limit && got.charCodeAt(p) === want.charCodeAt(p)) p++;
+    console.log(`${i}\t${p}\texpected=${context(want, p)}\tactual=${context(got, p)}`);
+  }
+  console.log(`DOCS ${matched}/${Math.max(0, cases.length - 680)}`);
+  process.exit(0);
+}
+
 let passed = 0;
 let specPassed = 0;
 let docsPassed = 0;
