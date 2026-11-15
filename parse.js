@@ -335,7 +335,7 @@ function unescapePunctuation(text) {
   return out;
 }
 
-function renderBlocks(lines, refs) {
+function renderBlocks(lines, refs, inListItem = false) {
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -440,7 +440,7 @@ function renderBlocks(lines, refs) {
       if (quote.length > 1 && isBlank(quote[quote.length - 1]) && quote[quote.length - 1].length > 0) {
         quote[quote.length - 2] += `\n${quote.pop()}`;
       }
-      let quoteHtml = renderBlocks(quote, refs);
+      let quoteHtml = renderBlocks(quote, refs, inListItem);
       if (quote.length && isHtmlBlockStart(quote[0]) && !quote.some(isBlank) && quoteHtml.endsWith('\n')) quoteHtml = quoteHtml.slice(0, -1);
       out.push(`<blockquote>\n${quoteHtml}</blockquote>\n`);
       continue;
@@ -464,7 +464,7 @@ function renderBlocks(lines, refs) {
         i++;
         continue;
       }
-      if (startsParagraphBlock(lines, i) && !isIndentedUnderline(lines[i]) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) break;
+      if (startsParagraphBlock(lines, i, inListItem) && !isIndentedUnderline(lines[i]) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) break;
       para.push(lines[i++]);
     }
     if (setext) out.push(`<h${setext}>${renderInline(trimAscii(para.join('\n')), refs)}</h${setext}>\n`);
@@ -487,11 +487,11 @@ function startsBlock(lines, i) {
   return atxHeading(line) || fenceStart(line) || isThematic(line) || quoteLine(line) !== null || listStart(line) || isIndentedCode(line) || isHtmlBlockStart(line) || (i + 1 < lines.length && setextLevel(lines[i + 1]));
 }
 
-function startsParagraphBlock(lines, i) {
+function startsParagraphBlock(lines, i, inListItem = false) {
   const list = listStart(lines[i]);
   if (list && !lines[i].slice(list.contentIndent).trim()) return false;
   if (isStandaloneInlineTag(lines[i])) return false;
-  if (list && list.ordered && list.start !== 1) return atxHeading(lines[i]) || fenceStart(lines[i]) || isThematic(lines[i]) || quoteLine(lines[i]) !== null || isIndentedCode(lines[i]) || isHtmlBlockStart(lines[i]);
+  if (list && list.ordered && list.start !== 1 && !inListItem) return atxHeading(lines[i]) || fenceStart(lines[i]) || isThematic(lines[i]) || quoteLine(lines[i]) !== null || isIndentedCode(lines[i]) || isHtmlBlockStart(lines[i]);
   return startsBlock(lines, i);
 }
 
@@ -644,7 +644,7 @@ function renderList(lines, start, refs, first) {
           loose = true;
           break;
         }
-        if (nextMarker && nextMarker.indent >= item.contentIndent && !item.hasNestedMarker && !nextMarker.ordered) {
+        if (nextMarker && nextMarker.indent >= item.contentIndent && !item.hasNestedMarker) {
           loose = true;
           item.push('');
           i = next;
@@ -652,7 +652,11 @@ function renderList(lines, start, refs, first) {
         }
         if (!nextMarker && next < lines.length && indentColumns(lines[next]) >= item.contentIndent && listStart(lines[next].trimStart())) {
           const nestedAfterBlank = listStart(lines[next].trimStart());
-          if (!nestedAfterBlank.ordered || indentColumns(lines[next]) >= item.contentIndent + 2) loose = true;
+          if (!item.hasNestedMarker) {
+            loose = true;
+            item.hasNestedMarker = true;
+            item.nestedContentIndent = indentColumns(lines[next]) + nestedAfterBlank.contentIndent;
+          }
           item.push('');
           i = next;
           continue;
@@ -683,8 +687,8 @@ function renderList(lines, start, refs, first) {
         continue;
       }
       if (nestedMarker) {
+        if (!item.hasNestedMarker) item.nestedContentIndent = next.contentIndent;
         item.hasNestedMarker = true;
-        item.nestedContentIndent = Math.max(item.nestedContentIndent, next.contentIndent);
       }
       if (activeFence) {
         if (fenceEnd(lines[i], activeFence)) activeFence = null;
@@ -695,6 +699,11 @@ function renderList(lines, start, refs, first) {
         let value = stripIndent(lines[i], item.contentIndent);
         if (value[0] === '\t') value = ' ' + value.slice(1);
         if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
+        const nestedFromValue = listStart(value);
+        if (nestedFromValue && !item.hasNestedMarker) {
+          item.hasNestedMarker = true;
+          item.nestedContentIndent = item.contentIndent + nestedFromValue.contentIndent;
+        }
         item.push(value);
       }
       else if (!startsBlock(lines, i) || (isIndentedCode(lines[i]) && indentColumns(lines[i]) < first.indent + 4)) item.push(lines[i].trimStart());
@@ -715,7 +724,7 @@ function renderList(lines, start, refs, first) {
       task = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox"> `;
       item[0] = item[0].slice(4);
     }
-    const inner = renderBlocks(item, refs);
+    const inner = renderBlocks(item, refs, true);
     let body = (loose ? inner : tightListItem(item, refs));
     if (!loose && item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
     const taskBody = task ? (loose ? body.replace('<p>', `<p>${task}`) : task + body) : body;
@@ -738,7 +747,7 @@ function tightListItem(lines, refs) {
       continue;
     }
     if (startsBlock(lines, i) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) {
-      out.push(renderBlocks(lines.slice(i), refs)); break;
+      out.push(renderBlocks(lines.slice(i), refs, true)); break;
     }
     const p = [lines[i++]];
     let level = 0;
