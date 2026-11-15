@@ -1009,7 +1009,9 @@ function tableCells(line) {
     if (line[i] === '`') {
       let run = 1;
       while (line[i + run] === '`') run++;
-      if (codeTicks === 0) codeTicks = run;
+      if (codeTicks === 0) {
+        if (findCodeClosing(line, i + run, '`'.repeat(run)) >= 0) codeTicks = run;
+      }
       else if (codeTicks === run) codeTicks = 0;
       i += run - 1;
       continue;
