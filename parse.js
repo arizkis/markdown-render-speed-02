@@ -1182,7 +1182,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
     if (c === '`') {
       let n = 1; while (text[i + n] === '`') n++;
       const mark = '`'.repeat(n);
-      const end = findCodeClosing(text, i + n, mark);
+      const end = codeMask?.[i] > 0 ? codeMask[i] - 1 : findCodeClosing(text, i + n, mark);
       if (end >= 0) {
         let code = replaceNewlines(text.slice(i + n, end), ' ');
         if (code.length > 1 && code[0] === ' ' && code[code.length - 1] === ' ' && code.trim()) code = code.slice(1, -1);
@@ -1282,17 +1282,19 @@ function renderInline(text, refs, suppressBareUrls = false) {
 }
 
 function inlineCodeMask(text) {
-  if (text.indexOf('`') < 0) return null;
   let mask = null;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\\') { i++; continue; }
-    if (text[i] !== '`') continue;
+  let i = text.indexOf('`');
+  while (i >= 0) {
+    let slashes = 0;
+    for (let p = i - 1; p >= 0 && text[p] === '\\'; p--) slashes++;
+    if (slashes & 1) { i = text.indexOf('`', i + 1); continue; }
     const count = delimiterRunLength(text, i, '`');
     const close = findCodeClosing(text, i + count, '`'.repeat(count));
-    if (close < 0) { i += count - 1; continue; }
-    if (!mask) mask = new Uint8Array(text.length);
-    mask.fill(1, i, close + count);
-    i = close + count - 1;
+    if (close < 0) { i = text.indexOf('`', i + count); continue; }
+    if (!mask) mask = new Int32Array(text.length);
+    mask.fill(-1, i, close + count);
+    mask[i] = close + 1;
+    i = text.indexOf('`', close + count);
   }
   return mask;
 }
