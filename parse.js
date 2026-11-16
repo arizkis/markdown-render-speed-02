@@ -666,6 +666,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
     i++;
     let blank = false;
     let activeFence = fenceStart(item[0]);
+    let fenceFirstContent = !!activeFence;
     while (i < lines.length) {
       if (isBlank(lines[i])) {
         if (activeFence) { item.push(''); i++; continue; }
@@ -709,6 +710,26 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
         i = next;
         break;
       }
+      if (activeFence) {
+        const indented = indentColumns(lines[i]) >= item.contentIndent;
+        const value = indented
+          ? stripFencedIndent(lines[i], item.contentIndent, baseIndent)
+          : lines[i];
+        if (fenceEnd(value, activeFence)) {
+          item.push(value);
+          activeFence = null;
+          i++;
+          continue;
+        }
+        if (fenceFirstContent && !indented) {
+          activeFence = null;
+          break;
+        }
+        fenceFirstContent = false;
+        item.push(value);
+        i++;
+        continue;
+      }
       if (i < lines.length && isThematic(lines[i]) && indentColumns(lines[i]) < item.contentIndent) break;
       const next = activeFence ? null : listStart(lines[i]);
       if (!activeFence && lines[i][0] === '\t' && listStart(lines[i].trimStart())) {
@@ -729,16 +750,11 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
         item.hasNestedMarker = true;
       }
       if (indentColumns(lines[i]) >= item.contentIndent) {
-        let value;
-        if (activeFence) {
-          value = stripFencedIndent(lines[i], item.contentIndent, baseIndent);
-          if (fenceEnd(value, activeFence)) activeFence = null;
-        } else {
-          value = stripIndent(lines[i], item.contentIndent);
-          if (value[0] === '\t') value = ' ' + value.slice(1);
-          if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
-          activeFence = fenceStart(value);
-        }
+        let value = stripIndent(lines[i], item.contentIndent);
+        if (value[0] === '\t') value = ' ' + value.slice(1);
+        if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
+        activeFence = fenceStart(value);
+        fenceFirstContent = !!activeFence;
         const nestedFromValue = listStart(value);
         if (!activeFence && nestedFromValue && !item.hasNestedMarker) {
           item.hasNestedMarker = true;
