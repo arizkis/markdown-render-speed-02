@@ -4,6 +4,8 @@ const COLLECT_REFS = Symbol('collect references');
 const IN_RAW_LINK = Symbol('inside an HTML anchor');
 const INLINE_SPECIAL = new Uint8Array(128);
 for (const c of '\n\\`&<[]!*_~"\'>') INLINE_SPECIAL[c.charCodeAt(0)] = 1;
+const EMAIL_LOCAL = new Uint8Array(128);
+for (const c of "!#$%&'*+/=?^_`{|}~.-") EMAIL_LOCAL[c.charCodeAt(0)] = 1;
 
 function escapeHtml(text, encode = false) {
   let out = '';
@@ -47,10 +49,6 @@ function normalizeLabel(label) {
 function isBlank(line) {
   for (let i = 0; i < line.length; i++) if (line.charCodeAt(i) !== 32 && line.charCodeAt(i) !== 9) return false;
   return true;
-}
-
-function indentOf(line) {
-  return Math.min(4, indentColumns(line));
 }
 
 function indentColumns(line) {
@@ -129,17 +127,6 @@ function replaceNewlines(text, replacement) {
   let out = '';
   for (let i = 0; i < text.length; i++) out += text[i] === '\n' ? replacement : text[i];
   return out;
-}
-
-function findClosing(text, from, marker) {
-  let p = from;
-  while ((p = text.indexOf(marker, p)) >= 0) {
-    let bs = 0;
-    for (let i = p - 1; i >= 0 && text[i] === '\\'; i--) bs++;
-    if ((bs & 1) === 0) return p;
-    p += marker.length;
-  }
-  return -1;
 }
 
 function parse(markdown) {
@@ -992,34 +979,45 @@ function isInlineHtml(inside) {
 }
 
 function isAutolink(inside) {
-  const colon = inside.indexOf(':');
-  if (colon > 1 && colon <= 32 && isAlpha(inside.charCodeAt(0))) {
-    let valid = true;
-    for (let i = 1; i < colon; i++) {
-      const c = inside.charCodeAt(i);
-      if (!isAlpha(c) && !isDigit(c) && inside[i] !== '+' && inside[i] !== '.' && inside[i] !== '-') { valid = false; break; }
+  const schemeEnd = autolinkSchemeColon(inside);
+  if (schemeEnd !== -1) {
+    for (let position = schemeEnd + 1; position < inside.length; position++) {
+      const code = inside.charCodeAt(position);
+      if (code === 60 || code === 62 || isSpace(inside[position])) return false;
     }
-    if (valid) {
-      for (let i = colon + 1; i < inside.length; i++) if (isSpace(inside[i]) || inside[i] === '<' || inside[i] === '>') return false;
-      return true;
-    }
+    return true;
   }
-  const at = inside.lastIndexOf('@');
-  if (at < 1 || at >= inside.length - 1) return false;
-  let dot = -1;
-  for (let i = 0; i < at; i++) {
-    const c = inside.charCodeAt(i), ch = inside[i];
-    if (isAlpha(c) || isDigit(c) || "!#$%&'*+/=?^_`{|}~-".includes(ch) || ch === '.') continue;
-    return false;
+  const separator = inside.lastIndexOf('@');
+  const length = inside.length;
+  if (separator <= 0 || separator + 1 === length) return false;
+  for (let position = 0; position < separator; position++) {
+    const code = inside.charCodeAt(position);
+    if (!isAlpha(code) && !isDigit(code) && !EMAIL_LOCAL[code]) return false;
   }
-  for (let i = at + 1; i < inside.length; i++) {
-    const c = inside.charCodeAt(i);
-    if (inside[i] === '.') { if (i === at + 1 || i === inside.length - 1) return false; dot = i; continue; }
-    if (!isAlpha(c) && !isDigit(c) && inside[i] !== '-') return false;
+  let finalDot = -1;
+  for (let position = separator + 1; position < length; position++) {
+    const code = inside.charCodeAt(position);
+    if (code === 46) {
+      if (position === separator + 1 || position + 1 === length) return false;
+      finalDot = position;
+    } else if (code !== 45 && !isAlpha(code) && !isDigit(code)) return false;
   }
-  if (dot < 0 || inside.length - dot < 3) return false;
-  for (let i = dot + 1; i < inside.length; i++) if (!isAlpha(inside.charCodeAt(i))) return false;
+  if (finalDot === -1 || finalDot + 2 >= length) return false;
+  for (let position = finalDot + 1; position < length; position++) {
+    if (!isAlpha(inside.charCodeAt(position))) return false;
+  }
   return true;
+}
+
+function autolinkSchemeColon(source) {
+  if (!isAlpha(source.charCodeAt(0))) return -1;
+  const limit = Math.min(source.length, 33);
+  for (let position = 1; position < limit; position++) {
+    const character = source.charCodeAt(position);
+    if (character === 58) return position > 1 ? position : -1;
+    if (!isAlpha(character) && !isDigit(character) && character !== 43 && character !== 45 && character !== 46) return -1;
+  }
+  return -1;
 }
 
 function isTableDelimiter(line) {
@@ -1387,24 +1385,6 @@ function delimiterRunLength(text, at, marker) {
   return n;
 }
 
-function wrapEmphasis(inner, count) {
-  if (count <= 0) return inner;
-  if (count % 2) return `<em>${wrapEmphasis(inner, count - 1)}</em>`;
-  return `<strong>${wrapEmphasis(inner, count - 2)}</strong>`;
-}
-
-function openEmphasis(count) {
-  if (count <= 0) return '';
-  if (count % 2) return `<em>${openEmphasis(count - 1)}`;
-  return `<strong>${openEmphasis(count - 2)}`;
-}
-
-function closeEmphasis(count) {
-  if (count <= 0) return '';
-  if (count % 2) return `${closeEmphasis(count - 1)}</em>`;
-  return `${closeEmphasis(count - 2)}</strong>`;
-}
-
 function delimiterInfo(text, at, count, marker) {
   const before = at > 0 ? text.codePointAt(at - (text.charCodeAt(at - 1) >= 0xdc00 && text.charCodeAt(at - 1) <= 0xdfff ? 2 : 1)) : 32;
   const afterAt = at + count;
@@ -1462,11 +1442,6 @@ function findEmphasisSpan(text, start, opening, marker, refs) {
     }
   }
   return null;
-}
-
-function findDelimiter(text, from, marker, openerCount) {
-  const matches = scanDelimiters(text, from, marker, openerCount, true, false);
-  return matches ? matches[0].at : -1;
 }
 
 function findDelimiterGroups(text, from, marker, openerCount, refs) {
@@ -1839,28 +1814,38 @@ function scanUrlEnd(text, start) {
 }
 
 function parseEmailAt(text, start, limit = text.length) {
-  let p = start;
-  while (p < limit && (isAlpha(text.charCodeAt(p)) || isDigit(text.charCodeAt(p)) || "!#$%&'*+/=?^_`{|}~.-".includes(text[p]))) p++;
-  if (text[p] !== '@' || p >= limit) return null;
-  p++;
-  while (p < limit && (isAlpha(text.charCodeAt(p)) || isDigit(text.charCodeAt(p)) || text[p] === '-' || text[p] === '.')) p++;
-  if (text[p] === '_') return null;
-  let end = p;
-  while (end > start && '.,!?;:'.includes(text[end - 1])) end--;
-  const value = text.slice(start, end);
-  const at = value.lastIndexOf('@');
-  if (at < 1 || at === value.length - 1) return null;
-  const local = value.slice(0, at), domain = value.slice(at + 1);
-  if (local[0] === '.' || local[local.length - 1] === '.' || local.includes('..')) return null;
-  for (let i = 0; i < local.length; i++) if (!isAlpha(local.charCodeAt(i)) && !isDigit(local.charCodeAt(i)) && !"!#$%&'*+/=?^_`{|}~.-".includes(local[i])) return null;
-  const labels = domain.split('.');
-  if (labels.length < 2) return null;
-  for (const part of labels) {
-    if (!part || part[0] === '-' || part[part.length - 1] === '-') return null;
-    for (let i = 0; i < part.length; i++) if (!isAlpha(part.charCodeAt(i)) && !isDigit(part.charCodeAt(i)) && part[i] !== '-') return null;
+  let cursor = start;
+  let previousDot = false;
+  while (cursor < limit) {
+    const character = text.charCodeAt(cursor);
+    if (!isAlpha(character) && !isDigit(character) && !EMAIL_LOCAL[character]) break;
+    const dot = character === 46;
+    if (dot && (cursor === start || previousDot)) return null;
+    previousDot = dot;
+    cursor++;
   }
-  if (labels[labels.length - 1].length < 1) return null;
-  return { value, end };
+  if (cursor === start || cursor >= limit || text.charCodeAt(cursor) !== 64 || previousDot) return null;
+  const domainStart = ++cursor;
+  for (; cursor < limit; cursor++) {
+    const character = text.charCodeAt(cursor);
+    if (!isAlpha(character) && !isDigit(character) && character !== 45 && character !== 46) break;
+  }
+  if (text.charCodeAt(cursor) === 95) return null;
+  let finish = cursor;
+  while (finish > domainStart && text.charCodeAt(finish - 1) === 46) finish--;
+  if (finish === domainStart) return null;
+
+  let labelStart = domainStart;
+  let separators = 0;
+  for (let position = domainStart; position <= finish; position++) {
+    if (position !== finish && text.charCodeAt(position) !== 46) continue;
+    if (position === labelStart) return null;
+    if (text.charCodeAt(labelStart) === 45 || text.charCodeAt(position - 1) === 45) return null;
+    if (position < finish) separators++;
+    labelStart = position + 1;
+  }
+  if (separators === 0) return null;
+  return { value: text.slice(start, finish), end: finish };
 }
 
 function isSpace(c) { return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }
