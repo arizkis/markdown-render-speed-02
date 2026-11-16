@@ -447,7 +447,11 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
       while (i < lines.length) {
         const marked = quoteLine(lines[i]);
         if (marked !== null) {
-          quote.push(marked);
+          let quoteColumn = baseIndent + quotePrefixWidth(lines[i]);
+          let markerAt = 0;
+          while (markerAt < lines[i].length && markerAt < 3 && lines[i][markerAt] === ' ') markerAt++;
+          if (lines[i][markerAt + 1] === '\t') quoteColumn++;
+          quote.push(expandQuoteTabs(marked, quoteColumn));
           quoteBlankSeen = isBlank(marked);
           if (quoteFence) {
             if (fenceEnd(marked, quoteFence)) quoteFence = null;
@@ -517,6 +521,21 @@ function quotePrefixWidth(line) {
   while (i < line.length && i < 3 && line[i] === ' ') i++;
   if (line[i] !== '>') return 0;
   return i + 1 + (line[i + 1] === ' ' ? 1 : 0);
+}
+
+function expandQuoteTabs(text, column) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\t') {
+      const width = 4 - (column % 4);
+      out += ' '.repeat(width);
+      column += width;
+    } else {
+      out += text[i];
+      column++;
+    }
+  }
+  return out;
 }
 
 function startsBlock(lines, i) {
