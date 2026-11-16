@@ -1078,6 +1078,40 @@ function tableCells(line) {
   return cells;
 }
 
+function findStrikeClose(text, start, refs) {
+  let depth = 1;
+  for (let i = start + 2; i < text.length;) {
+    if (text[i] === '\\') { i += Math.min(2, text.length - i); continue; }
+    if (text[i] === '`') {
+      const ticks = delimiterRunLength(text, i, '`');
+      const end = findCodeClosing(text, i + ticks, '`'.repeat(ticks));
+      i = end < 0 ? i + ticks : end + ticks;
+      continue;
+    }
+    if (text[i] === '<') {
+      const end = inlineTagEnd(text, i);
+      if (end >= 0) { i = end + 1; continue; }
+    }
+    if (text[i] === '[' || (text[i] === '!' && text[i + 1] === '[')) {
+      const link = parseLink(text, i, refs);
+      if (link) { i = link.end; continue; }
+    }
+    if (text[i] !== '~') { i++; continue; }
+    let run = 1;
+    while (text[i + run] === '~') run++;
+    if (run === 2) {
+      const canOpen = !isSpace(text[i + 2]);
+      const canClose = i > 0 && !isSpace(text[i - 1]);
+      if (canClose) {
+        if (depth === 1) return i;
+        depth--;
+      } else if (canOpen) depth++;
+    }
+    i += run;
+  }
+  return -1;
+}
+
 function renderInline(text, refs, suppressBareUrls = false) {
   const out = [];
   let i = 0;
@@ -1146,9 +1180,9 @@ function renderInline(text, refs, suppressBareUrls = false) {
     }
     const url = suppressBareUrls ? null : extendedUrlAt(text, i);
     if (url) { out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`); i = url.end; continue; }
-    if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~') {
-      const end = text.indexOf('~~', i + 2);
-      if (end > i + 2 && !isSpace(text[end - 1]) && !isSpace(text[i + 2])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs)}</del>`); i = end + 2; continue; }
+    if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
+      const end = findStrikeClose(text, i, refs);
+      if (end > i + 2 && !isSpace(text[end - 1])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs)}</del>`); i = end + 2; continue; }
     }
     if (c === '~' && text[i + 1] !== '~' && text[i - 1] !== '~' && !isSpace(text[i + 1])) {
       const end = text.indexOf('~', i + 1);
