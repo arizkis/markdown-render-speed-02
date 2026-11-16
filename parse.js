@@ -815,7 +815,7 @@ function isHtmlBlockStart(line) {
   if (s[at] && s[at] !== ' ' && s[at] !== '\t' && s[at] !== '/' && s[at] !== '>') return false;
   const tagName = s.slice(s[1] === '/' ? 2 : 1, at).toLowerCase();
   if (HTML_BLOCK_TAGS.has(tagName)) return true;
-  return isStandaloneInlineTag(s, tagName, at);
+  return validHtmlTag(s);
 }
 
 const HTML_BLOCK_TAGS = new Set('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav ol p pre script section summary style table tbody td textarea tfoot th thead title tr track ul picture source'.split(' '));
@@ -831,9 +831,7 @@ function isStandaloneInlineTag(text, name = '', end = -1) {
     end = i;
     name = s.slice(start, i).toLowerCase();
   }
-  const sourceName = s.slice(s[1] === '/' ? 2 : 1, end);
-  const allowed = name === 'a' || name === 'del' || name === 'i' || name === 'ins' || (sourceName[0] >= 'A' && sourceName[0] <= 'Z');
-  return allowed && validHtmlTag(s);
+  return validHtmlTag(s) && !HTML_BLOCK_TAGS.has(name);
 }
 
 function validHtmlTag(text) {
