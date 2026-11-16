@@ -1156,7 +1156,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         if (isInlineHtml(inside)) {
           const tag = inside.toLowerCase();
           if (tag === '/a') refs[IN_RAW_LINK] = false;
-          else if (tag[0] === 'a' && (tag.length === 1 || isSpace(tag[1]) || tag[1] === '/')) refs[IN_RAW_LINK] = true;
+          else if (tag[0] === 'a' && (tag.length === 1 || isSpace(tag[1]))) refs[IN_RAW_LINK] = true;
           let end = close + 1;
           if (inside[0] === '/' && text[end] === '<') {
             const nextEnd = inlineTagEnd(text, end);
