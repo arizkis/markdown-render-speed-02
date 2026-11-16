@@ -7,6 +7,8 @@ function escapeHtml(text, encode = false) {
   let out = '';
   let start = 0;
   for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code !== 38 && code !== 60 && code !== 62 && code !== 34 && code !== 39) continue;
     const c = text[i];
     let escaped;
     if (c === '&') {
@@ -164,7 +166,7 @@ function parse(markdown) {
   const lines = splitLines(markdown);
   const refs = Object.create(null);
   refs[COLLECT_REFS] = true;
-  renderBlocks(lines, refs);
+  if (String(markdown).includes(']:')) renderBlocks(lines, refs);
   refs[COLLECT_REFS] = false;
   refs[IN_RAW_LINK] = false;
   let html = renderBlocks(lines, refs);
@@ -324,6 +326,7 @@ function unescapePunctuation(text) {
 function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false, quoted = false) {
   const out = [];
   const collecting = refs[COLLECT_REFS];
+  if (collecting && !hasReferenceSyntax(lines)) return '';
   let i = 0;
   while (i < lines.length) {
     if (isBlank(lines[i])) { i++; continue; }
@@ -795,6 +798,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
   const attr = first.ordered && first.start !== 1 ? ` start="${first.start}"` : '';
   const out = [`<${tag}${attr}>\n`];
   for (const item of items) {
+    if (refs[COLLECT_REFS] && !hasReferenceSyntax(item)) continue;
     while (item.length && isBlank(item[0])) item.shift();
     while (item.length && isBlank(item[item.length - 1])) item.pop();
     let task = '';
@@ -814,6 +818,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
 
 function tightListItem(lines, refs, baseIndent) {
   if (!lines.length) return '';
+  if (refs[COLLECT_REFS] && !hasReferenceSyntax(lines)) return '';
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -843,6 +848,11 @@ function tightListItem(lines, refs, baseIndent) {
     out.push(level ? `<h${level}>${content}</h${level}>\n` : content);
   }
   return out.join('');
+}
+
+function hasReferenceSyntax(lines) {
+  for (let i = 0; i < lines.length; i++) if (lines[i].includes(']:')) return true;
+  return false;
 }
 
 function isHtmlBlockStart(line) {
@@ -1279,6 +1289,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
 }
 
 function inlineCodeMask(text) {
+  if (text.indexOf('`') < 0) return null;
   let mask = null;
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '\\') { i++; continue; }
@@ -1619,6 +1630,7 @@ function parseLink(text, start, refs, probe = false) {
 }
 
 function hasTrailingTextAfterMixedCode(label) {
+  if (label.indexOf('``') < 0) return false;
   for (let i = 0; i < label.length; i++) {
     if (label[i] === '\\') { i++; continue; }
     if (label[i] !== '`') continue;
@@ -1633,6 +1645,7 @@ function hasTrailingTextAfterMixedCode(label) {
 }
 
 function labelHasMarkdownLink(label, refs) {
+  if (label.indexOf('[') < 0) return false;
   for (let i = 0; i < label.length; i++) {
     if (label[i] === '!' && label[i + 1] === '[') {
       const image = parseLink(label, i, refs, true);
