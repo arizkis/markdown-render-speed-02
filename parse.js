@@ -338,7 +338,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       const result = renderList(lines, i, refs, list, baseIndent);
       out.push(result.html); i = result.next; continue;
     }
-    if (i + 1 < lines.length && isTableDelimiter(lines[i + 1])) {
+    if (i + 1 < lines.length && line.includes('|') && isTableDelimiter(lines[i + 1])) {
       const table = renderTable(lines, i, refs);
       if (table) { out.push(table.html); i = table.next; continue; }
     }
@@ -1251,14 +1251,15 @@ function renderInline(text, refs, suppressBareUrls = false) {
       }
       if (!canOpen && n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
     }
+    if (ESC[c]) { out.push(ESC[c]); i++; continue; }
     let end = i + 1;
     while (end < text.length) {
       const next = text.charCodeAt(end);
-      if (next === 10 || next === 92 || next === 96 || next === 38 || next === 60 || next === 91 || next === 93 || next === 33 || next === 42 || next === 95 || next === 126) break;
-      if (!suppressBareUrls && !refs[IN_RAW_LINK] && isAlpha(next) && !isWord(text[end - 1])) break;
+      if (next === 10 || next === 92 || next === 96 || next === 38 || next === 60 || next === 91 || next === 93 || next === 33 || next === 42 || next === 95 || next === 126 || next === 34 || next === 39 || next === 62) break;
+      if (!suppressBareUrls && !refs[IN_RAW_LINK] && (end < lastEmailAt || (next | 32) === 104 || next === 119) && isAlpha(next) && !isWord(text[end - 1])) break;
       end++;
     }
-    out.push(escapeHtml(text.slice(i, end)));
+    out.push(text.slice(i, end));
     i = end;
   }
   return out.join('');
