@@ -1146,12 +1146,20 @@ function renderInline(text, refs, suppressBareUrls = false) {
   while (i < text.length) {
     const c = text[i];
     if (c === '\\' && i + 1 < text.length) {
-      if (text[i + 1] === '\n') { out.push('<br>'); i += 2; continue; }
+      if (text[i + 1] === '\n') {
+        out.push('<br>');
+        i += 2;
+        while (text[i] === ' ' || text[i] === '\t') i++;
+        continue;
+      }
       if (PUNCT.includes(text[i + 1])) { out.push(escapeHtml(text[i + 1])); i += 2; continue; }
     }
     if (c === '\n') {
       let spaces = 0; while (out.length && out[out.length - 1] === ' ') { out.pop(); spaces++; }
-      out.push(spaces >= 2 ? '<br>' : `${' '.repeat(spaces)}\n`); i++; continue;
+      out.push(spaces >= 2 ? '<br>' : `${' '.repeat(spaces)}\n`);
+      i++;
+      if (spaces >= 2) while (text[i] === ' ' || text[i] === '\t') i++;
+      continue;
     }
     if (c === '`') {
       let n = 1; while (text[i + n] === '`') n++;
