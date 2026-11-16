@@ -395,11 +395,11 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       while (i < lines.length) {
         const marked = quoteLine(lines[i]);
         if (marked !== null) {
-          let quoteColumn = baseIndent + quotePrefixWidth(lines[i]);
+          let quoteColumn = quotePrefixWidth(lines[i]);
           let markerAt = 0;
           while (markerAt < lines[i].length && markerAt < 3 && lines[i][markerAt] === ' ') markerAt++;
           if (lines[i][markerAt + 1] === '\t') quoteColumn++;
-          quote.push(expandQuoteTabs(marked, quoteColumn));
+          quote.push(quoteLine(marked) !== null ? marked : expandQuoteTabs(marked, quoteColumn));
           quoteBlankSeen = isBlank(marked);
           if (quoteFence) {
             if (fenceEnd(marked, quoteFence)) quoteFence = null;
