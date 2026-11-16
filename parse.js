@@ -1181,7 +1181,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
     }
     if (c === '~' && text[i + 1] !== '~' && text[i - 1] !== '~' && !isSpace(text[i + 1])) {
       const end = text.indexOf('~', i + 1);
-      if (end > i + 1 && text[end - 1] !== '~' && !isSpace(text[end - 1])) {
+      if (end > i + 1 && text[end - 1] !== '~' && text[end + 1] !== '~' && !isSpace(text[end - 1])) {
         out.push(`<del>${renderInline(text.slice(i + 1, end), refs, suppressBareUrls)}</del>`);
         i = end + 1;
         continue;
