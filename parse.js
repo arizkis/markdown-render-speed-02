@@ -367,7 +367,8 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
     if (fence) {
       const content = [];
       i++;
-      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFenceContent(lines[i++], fence.indent, baseIndent));
+      const contentIndent = fence.ch === '~' ? 0 : fence.indent;
+      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFenceContent(lines[i++], contentIndent, baseIndent));
       if (i < lines.length) i++;
       const info = fence.info;
       let language = '';
