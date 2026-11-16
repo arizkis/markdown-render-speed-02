@@ -1496,6 +1496,10 @@ function parseLink(text, start, refs) {
 
 function labelHasMarkdownLink(label, refs) {
   for (let i = 0; i < label.length; i++) {
+    if (label[i] === '!' && label[i + 1] === '[') {
+      const image = parseLink(label, i, refs);
+      if (image) { i = image.end - 1; continue; }
+    }
     if (label[i] !== '[' || (i > 0 && label[i - 1] === '\\')) continue;
     const close = findLabelClose(label, i);
     if (close >= label.length) continue;
