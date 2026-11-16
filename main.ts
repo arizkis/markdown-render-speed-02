@@ -2,25 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse } from './parse.js';
 
-function readInputs(filename) {
-  const document = JSON.parse(fs.readFileSync(filename, { encoding: 'utf8' }));
-  if (Array.isArray(document)) return document;
-  return Object.values(document.cases ?? document);
-}
+const inputRoot = process.env.MAKEFUN_INPUT_DIR || '/input';
+const outputRoot = process.env.MAKEFUN_OUTPUT_DIR || '/output';
+const inputFile = process.env.INPUT_CASES || process.argv[2] || path.join(inputRoot, 'cases.json');
+const outputFile = process.env.OUTPUT_HTML || process.argv[3] || path.join(outputRoot, 'html.json');
 
-function renderInput(item) {
-  const markdown = typeof item === 'string' ? item : item?.markdown ?? '';
-  return parse(markdown);
-}
+const payload = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+const cases = Array.isArray(payload) ? payload : Object.values(payload.cases ?? payload);
+const html = cases.map(item => parse(typeof item === 'string' ? item : item?.markdown ?? ''));
 
-function run() {
-  const inputDirectory = process.env.MAKEFUN_INPUT_DIR || '/input';
-  const outputDirectory = process.env.MAKEFUN_OUTPUT_DIR || '/output';
-  const sourceFile = process.env.INPUT_CASES || process.argv[2] || path.resolve(inputDirectory, 'cases.json');
-  const destinationFile = process.env.OUTPUT_HTML || process.argv[3] || path.resolve(outputDirectory, 'html.json');
-  const renderedCases = readInputs(sourceFile).map(renderInput);
-  fs.mkdirSync(path.dirname(destinationFile), { recursive: true });
-  fs.writeFileSync(destinationFile, JSON.stringify(renderedCases));
-}
-
-run();
+fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+fs.writeFileSync(outputFile, JSON.stringify(html));

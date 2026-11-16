@@ -1,1744 +1,2101 @@
-const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const PUNCT = "!\"#$%&'()*+,\-./:;<=>?@[\\]^_`{|}~";
-const COLLECT_REFS = Symbol('collect references');
+const ESC = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&#39;', '"': '&quot;' };
+const PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 const IN_RAW_LINK = Symbol('inside an HTML anchor');
-const INLINE_SPECIAL = new Uint8Array(128);
-for (const c of '\n\\`&<[]!*_~"\'>') INLINE_SPECIAL[c.charCodeAt(0)] = 1;
-const EMAIL_LOCAL = new Uint8Array(128);
-for (const c of "!#$%&'*+/=?^_`{|}~.-") EMAIL_LOCAL[c.charCodeAt(0)] = 1;
+const COLLECT_REFS = Symbol('collect references');
+const EMAIL_LOCAL = asciiFlags("!#$%&'*+/=?^_`{|}~.-");
+const INLINE_SPECIAL = asciiFlags('\n\\`&<[]!*_~"\'>');
 
-function escapeHtml(text, encode = false) {
-  let out = '';
-  let start = 0;
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code !== 38 && code !== 60 && code !== 62 && code !== 34 && code !== 39) continue;
-    const c = text[i];
-    let escaped;
-    if (c === '&') {
-      const end = encode ? i : entityAt(text, i);
-      if (end > i) { i = end - 1; continue; }
-      escaped = '&amp;';
-    } else escaped = ESC[c];
-    if (escaped) {
-      out += text.slice(start, i) + escaped;
-      start = i + 1;
+function asciiFlags(characters) {
+  const flags = new Uint8Array(128);
+  for (let offset = 0; offset < characters.length; offset++) {
+    flags[characters.charCodeAt(offset)] = 1;
+  }
+  return flags;
+}
+
+function escapeHtml(source, encode = false) {
+  let rendered = '';
+  let copiedThrough = 0;
+  for (let cursor = 0; cursor < source.length; cursor++) {
+    switch (source.charCodeAt(cursor)) {
+      case 38:
+        if (!encode) {
+          const entityLimit = entityAt(source, cursor);
+          if (entityLimit > cursor) {
+            cursor = entityLimit - 1;
+            continue;
+          }
+        }
+        break;
+      case 34: case 39: case 60: case 62:
+        break;
+      default:
+        continue;
+    }
+    rendered += source.slice(copiedThrough, cursor) + ESC[source[cursor]];
+    copiedThrough = cursor + 1;
+  }
+  return copiedThrough === 0 ? source : rendered + source.slice(copiedThrough);
+}
+
+function cleanUrl(address) {
+  let uri;
+  try {
+    uri = encodeURI(address.trim());
+  } catch {
+    uri = address.trim();
+  }
+  return escapeHtml(uri.replaceAll('%25', '%'));
+}
+
+function normalizeLabel(source) {
+  let key = '';
+  let needsSeparator = false;
+  let cursor = 0;
+  while (cursor < source.length) {
+    const character = source[cursor++];
+    if (character === '\t' || character === '\n' || character === ' ') {
+      needsSeparator = key.length > 0;
+    } else {
+      key += (needsSeparator ? ' ' : '') + (character === '\u1e9e' ? 'ss' : character.toLowerCase());
+      needsSeparator = false;
     }
   }
-  return start ? out + text.slice(start) : text;
+  return key;
 }
 
-function cleanUrl(url) {
-  let encoded = '';
-  try { encoded = encodeURI(url.trim()); } catch { encoded = url.trim(); }
-  return escapeHtml(encoded.replaceAll('%25', '%'), false);
+function isBlank(source) {
+  return leadingSpaces(source) === source.length;
 }
 
-function normalizeLabel(label) {
-  let out = '', pendingSpace = false;
-  for (let i = 0; i < label.length; i++) {
-    const c = label[i];
-    if (c === ' ' || c === '\t' || c === '\n') { if (out) pendingSpace = true; continue; }
-    if (pendingSpace) out += ' ';
-    pendingSpace = false;
-    out += c === '\u1e9e' ? 'ss' : c.toLowerCase();
+function trimAscii(source) {
+  const begin = leadingSpaces(source);
+  let limit = source.length;
+  while (limit > begin) {
+    const code = source.charCodeAt(limit - 1);
+    if (code !== 9 && code !== 32) break;
+    limit--;
   }
-  return out;
+  return source.slice(begin, limit);
 }
 
-function isBlank(line) {
-  for (let i = 0; i < line.length; i++) if (line.charCodeAt(i) !== 32 && line.charCodeAt(i) !== 9) return false;
-  return true;
-}
-
-function indentColumns(line) {
-  let n = 0;
-  for (let i = 0; i < line.length; i++) {
-    if (line[i] === ' ') n++;
-    else if (line[i] === '\t') n = (n + 4) & ~3;
-    else break;
+function indentColumns(source) {
+  let columns = 0;
+  for (let cursor = 0; cursor < source.length; cursor++) {
+    switch (source[cursor]) {
+      case ' ': columns++; break;
+      case '\t': columns = (columns + 4) & ~3; break;
+      default: return columns;
+    }
   }
-  return n;
+  return columns;
 }
 
-function stripIndent(line, count, retainTabs = false) {
-  return removeIndentation(line, count, 0, false, !retainTabs);
-}
-
-function stripFencedIndent(line, count, baseIndent) {
-  return removeIndentation(line, count, baseIndent, true, false);
-}
-
-function removeIndentation(source, requested, origin, expandRemainder, listTabs) {
-  let position = 0;
-  let column = origin;
-  let toRemove = requested;
-  let spacesToKeep = 0;
-  while (position < source.length) {
-    const character = source.charCodeAt(position);
-    if (character !== 32 && character !== 9) break;
-    if (toRemove <= 0 && !expandRemainder) break;
-    const width = character === 9 ? 4 - (column & 3) : 1;
-    const removed = Math.min(Math.max(toRemove, 0), width);
-    toRemove -= removed;
-    spacesToKeep += width - removed;
-    column += width;
-    position++;
+function consumeIndent(source, requested, origin, expandTail, adjustListTabs) {
+  let cursor = 0;
+  let absoluteColumn = origin;
+  let remaining = requested;
+  let retained = 0;
+  while (cursor < source.length) {
+    const code = source.charCodeAt(cursor);
+    if (code !== 9 && code !== 32) break;
+    if (!expandTail && remaining <= 0) break;
+    const columns = code === 32 ? 1 : 4 - (absoluteColumn & 3);
+    const taken = Math.min(columns, Math.max(0, remaining));
+    retained += columns - taken;
+    remaining -= taken;
+    absoluteColumn += columns;
+    cursor++;
   }
-  let suffix = source.slice(position);
-  if (listTabs && requested > 0 && source.charCodeAt(0) === 9 && suffix.charCodeAt(0) === 9) {
-    suffix = '  ' + suffix.slice(1);
+  let tail = source.slice(cursor);
+  if (adjustListTabs && requested > 0 && source[0] === '\t' && tail[0] === '\t') {
+    tail = '  ' + tail.slice(1);
   }
-  return spacesToKeep === 0 ? suffix : ' '.repeat(spacesToKeep) + suffix;
+  return retained ? ' '.repeat(retained) + tail : tail;
 }
 
-function stripFenceContent(line, count, baseIndent) {
-  if (baseIndent) return stripFencedIndent(line, count, baseIndent);
-  let i = 0;
-  while (i < count && (line[i] === ' ' || line[i] === '\t')) i++;
-  return line.slice(i);
+function stripIndent(source, columns, retainTabs = false) {
+  return consumeIndent(source, columns, 0, false, !retainTabs);
 }
 
-function splitLines(markdown) {
-  let normalized = String(markdown);
-  if (normalized.indexOf('\r') !== -1) {
-    normalized = normalized.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+function stripFencedIndent(source, columns, baseIndent) {
+  return consumeIndent(source, columns, baseIndent, true, false);
+}
+
+function stripFenceContent(source, columns, baseIndent) {
+  if (baseIndent) return stripFencedIndent(source, columns, baseIndent);
+  const removed = Math.min(columns, leadingSpaces(source));
+  return source.slice(removed);
+}
+
+function markdownLines(value) {
+  let source = String(value);
+  if (source.includes('\r')) source = source.replace(/\r\n?/g, '\n');
+  const rows = source.split('\n');
+  if (rows[rows.length - 1] === '') rows.pop();
+  return rows;
+}
+
+function replaceNewlines(source, replacement) {
+  let rendered = '';
+  let begin = 0;
+  for (let newline = source.indexOf('\n'); newline >= 0; newline = source.indexOf('\n', begin)) {
+    rendered += source.slice(begin, newline) + replacement;
+    begin = newline + 1;
   }
-  const result = normalized.split('\n');
-  if (result[result.length - 1] === '') result.length--;
-  return result;
-}
-
-function trimAscii(text) {
-  let start = 0, end = text.length;
-  while (start < end && (text[start] === ' ' || text[start] === '\t')) start++;
-  while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) end--;
-  return text.slice(start, end);
-}
-
-function replaceNewlines(text, replacement) {
-  let out = '';
-  for (let i = 0; i < text.length; i++) out += text[i] === '\n' ? replacement : text[i];
-  return out;
+  return rendered + source.slice(begin);
 }
 
 function parse(markdown) {
-  const lines = splitLines(markdown);
-  const refs = Object.create(null);
-  refs[COLLECT_REFS] = true;
-  if (String(markdown).includes(']:')) renderBlocks(lines, refs);
-  refs[COLLECT_REFS] = false;
-  refs[IN_RAW_LINK] = false;
-  let html = renderBlocks(lines, refs);
-  if (!String(markdown).endsWith('\n') && String(markdown).endsWith('</blockquote>') && html.endsWith('</blockquote>\n')) {
-    html = html.slice(0, -1);
-  }
-  return html;
+  const sourceLines = markdownLines(markdown);
+  const references = Object.create(null);
+  references[COLLECT_REFS] = true;
+  if (String(markdown).includes(']:')) renderBlocks(sourceLines, references);
+  references[COLLECT_REFS] = false;
+  references[IN_RAW_LINK] = false;
+  const rendered = renderBlocks(sourceLines, references);
+  const omitFinalNewline = !String(markdown).endsWith('\n')
+    && String(markdown).endsWith('</blockquote>')
+    && rendered.endsWith('</blockquote>\n');
+  return omitFinalNewline ? rendered.slice(0, -1) : rendered;
 }
 
-function saveReference(refs, parsed) {
-  const label = normalizeLabel(parsed.label);
-  if (!label) return false;
-  if (!Object.prototype.hasOwnProperty.call(refs, label)) refs[label] = { url: parsed.url, title: parsed.title };
+function saveReference(references, definition) {
+  const key = normalizeLabel(definition.label);
+  if (key.length === 0) return false;
+  if (Object.hasOwn(references, key)) return true;
+  references[key] = { url: definition.url, title: definition.title };
   return true;
 }
 
 function parseReferenceDefinition(lines, start, leading) {
-  let defLine = lines[start];
-  let close = findUnescaped(defLine, ']:', leading + 1);
-  let last = start;
-  while (close < 0 && last + 1 < lines.length && !isBlank(lines[last + 1])) {
-    defLine += '\n' + lines[++last];
-    close = findUnescaped(defLine, ']:', leading + 1);
+  let row = start;
+  let declaration = lines[row];
+  let boundary = seekUnescapedSequence(declaration, ']:', leading + 1);
+  for (; boundary < 0 && row + 1 < lines.length && !isBlank(lines[row + 1]);) {
+    declaration += '\n' + lines[++row];
+    boundary = seekUnescapedSequence(declaration, ']:', leading + 1);
   }
-  if (close <= leading + 1) return null;
-  const label = defLine.slice(leading + 1, close);
-  if (hasUnescapedBracket(label, '[') || hasUnescapedBracket(label, ']')) return null;
-  let i = last;
-  let rest = defLine.slice(close + 2);
-  let url = '';
-  let title = '';
-  let hasUrl = false;
-  let consumed = false;
-  while (true) {
-    rest = trimAscii(rest);
-    if (!url) {
-      if (!rest) {
-        if (i + 1 >= lines.length || isBlank(lines[i + 1])) return null;
-        i++;
-        rest = lines[i];
-        consumed = true;
+  if (boundary <= leading + 1) return null;
+  const labelText = declaration.slice(leading + 1, boundary);
+  if (seekUnescapedSequence(labelText, '[') >= 0 || seekUnescapedSequence(labelText, ']') >= 0) return null;
+
+  let remainder = declaration.slice(boundary + 2);
+  let address = '';
+  let caption = '';
+  let readAddress = false;
+  for (;;) {
+    remainder = trimAscii(remainder);
+    if (address.length === 0) {
+      if (remainder.length === 0) {
+        if (row + 1 === lines.length || isBlank(lines[row + 1])) return null;
+        remainder = lines[++row];
         continue;
       }
-      if (rest[0] === '<') {
-        const end = rest.indexOf('>');
-        if (end < 0 || hasNewline(rest.slice(0, end))) return null;
-        url = unescapePunctuation(rest.slice(1, end));
-        hasUrl = true;
-        const tail = rest.slice(end + 1);
-        if (tail && !isSpace(tail[0])) return null;
-        rest = tail;
-      } else {
-        let end = 0;
-        let depth = 0;
-        while (end < rest.length) {
-          const c = rest[end];
-          if (c === '\\' && end + 1 < rest.length) { end += 2; continue; }
-          if (c === '(') depth++;
-          else if (c === ')' && depth > 0) depth--;
-          else if (isSpace(c) && depth === 0) break;
-          end++;
-        }
-        if (!end || depth) return null;
-        url = unescapePunctuation(rest.slice(0, end));
-        hasUrl = true;
-        rest = rest.slice(end);
-      }
-      consumed = true;
+      const destination = readDefinitionAddress(remainder);
+      if (destination === null) return null;
+      address = destination.address;
+      remainder = destination.tail;
+      readAddress = true;
     }
-    rest = trimAscii(rest);
-    if (!rest) {
-      if (i + 1 < lines.length && !isBlank(lines[i + 1]) && isTitleStart(trimAscii(lines[i + 1]))) {
-        i++;
-        rest = lines[i];
-        const titleProbe = trimAscii(rest);
-        const titleClose = findTitleClose(titleProbe, 1, titleProbe[0]);
-        if (titleClose >= 0 && trimAscii(titleProbe.slice(titleClose + 1))) { i--; break; }
-        consumed = true;
-        continue;
-      }
+
+    remainder = trimAscii(remainder);
+    if (remainder.length > 0) {
+      const parsedTitle = readDefinitionTitle(lines, row, remainder);
+      if (parsedTitle === null) return null;
+      caption = parsedTitle.caption;
+      row = parsedTitle.lastRow;
       break;
     }
-    const opener = rest[0];
-    if (opener !== '"' && opener !== "'" && opener !== '(') return null;
-    const closer = opener === '(' ? ')' : opener;
-    let end = 1;
-    let titleParts = [];
-    while (true) {
-      const at = findTitleClose(rest, end, closer);
-      if (at >= 0) {
-        titleParts.push(rest.slice(end, at));
-        const tail = trimAscii(rest.slice(at + 1));
-        if (tail) return null;
-        title = unescapePunctuation(titleParts.join('\n'));
-        break;
-      }
-      titleParts.push(rest.slice(end));
-      if (i + 1 >= lines.length || isBlank(lines[i + 1])) return null;
-      i++;
-      rest = lines[i];
-      end = 0;
-      consumed = true;
-    }
-    break;
+    if (row + 1 === lines.length || isBlank(lines[row + 1])) break;
+    const candidate = trimAscii(lines[row + 1]);
+    if (!beginsReferenceTitle(candidate)) break;
+    const probeEnd = seekTitleDelimiter(candidate, 1, candidate[0]);
+    if (probeEnd >= 0 && trimAscii(candidate.slice(probeEnd + 1))) break;
+    remainder = lines[++row];
   }
-  return consumed && hasUrl ? { label, url, title, next: i + 1 } : null;
+  return readAddress ? { label: labelText, url: address, title: caption, next: row + 1 } : null;
 }
 
-function hasUnescapedBracket(text, bracket) {
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== bracket) continue;
-    let slashes = 0;
-    for (let j = i - 1; j >= 0 && text[j] === '\\'; j--) slashes++;
-    if (!(slashes & 1)) return true;
+function readDefinitionAddress(source) {
+  if (source[0] === '<') {
+    const limit = source.indexOf('>');
+    if (limit < 0) return null;
+    const enclosed = source.slice(0, limit);
+    if (enclosed.includes('\r') || enclosed.includes('\n')) return null;
+    const tail = source.slice(limit + 1);
+    if (tail.length && !isSpace(tail[0])) return null;
+    return { address: unescapePunctuation(source.slice(1, limit)), tail };
   }
-  return false;
-}
 
-function isTitleStart(text) { return text[0] === '"' || text[0] === "'" || text[0] === '('; }
-
-function findTitleClose(text, from, closer) {
-  for (let i = from; i < text.length; i++) {
-    if (text[i] === '\\' && i + 1 < text.length) { i++; continue; }
-    if (text[i] === closer) return i;
-  }
-  return -1;
-}
-
-function leadingSpaces(line) {
-  let i = 0;
-  while (line[i] === ' ' || line[i] === '\t') i++;
-  return i;
-}
-
-function findUnescaped(text, needle, from = 0) {
-  let at = from;
-  while ((at = text.indexOf(needle, at)) >= 0) {
-    let slash = 0;
-    for (let i = at - 1; i >= 0 && text[i] === '\\'; i--) slash++;
-    if (!(slash & 1)) return at;
-    at += needle.length;
-  }
-  return -1;
-}
-
-function hasNewline(text) { return text.includes('\n') || text.includes('\r'); }
-
-function unescapePunctuation(text) {
-  if (text.indexOf('\\') < 0) return text;
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\\' && i + 1 < text.length && PUNCT.includes(text[i + 1])) out += text[++i];
-    else out += text[i];
-  }
-  return out;
-}
-
-function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false, quoted = false) {
-  const out = [];
-  const collecting = refs[COLLECT_REFS];
-  if (collecting && !hasReferenceSyntax(lines)) return '';
-  let i = 0;
-  while (i < lines.length) {
-    if (isBlank(lines[i])) { i++; continue; }
-    const line = lines[i];
-    const leading = leadingSpaces(line);
-    const initial = line.charCodeAt(leading);
-    if (initial === 91 && indentColumns(line) < 4) {
-      const definition = parseReferenceDefinition(lines, i, leading);
-      if (definition && saveReference(refs, definition)) { i = definition.next; continue; }
-    }
-    if ((initial === 42 || initial === 45 || initial === 95) && isThematic(line)) { if (!collecting) out.push('<hr>\n'); i++; continue; }
-    const list = initial === 42 || initial === 45 || initial === 43 || isDigit(initial) ? listStart(line) : null;
-    if (list) {
-      const result = renderList(lines, i, refs, list, baseIndent);
-      out.push(result.html); i = result.next; continue;
-    }
-    if (i + 1 < lines.length && line.includes('|') && isTableDelimiter(lines[i + 1])) {
-      const table = renderTable(lines, i, refs);
-      if (table) { out.push(table.html); i = table.next; continue; }
-    }
-    if (initial === 60 && isHtmlBlockStart(line)) {
-      const block = collecting ? null : [line];
-      const tag = htmlBlockTag(line);
-      const rawTag = tag === '!--' || tag === '?' || tag === '![CDATA[' || tag === 'script' || tag === 'style' || tag === 'pre' || tag === 'textarea';
-      let endedByBlank = false;
-      i++;
-      if (rawTag && !htmlBlockEnd(line, tag)) {
-        while (i < lines.length) {
-          const next = lines[i++];
-          if (block) block.push(next);
-          if (htmlBlockEnd(next, tag)) break;
-        }
-      } else if (!rawTag) {
-        while (i < lines.length && !isBlank(lines[i])) {
-          if (block) block.push(lines[i]);
-          i++;
-        }
-        endedByBlank = i < lines.length;
-      }
-      let joinNewline = !endedByBlank;
-      if (rawTag && i < lines.length && isBlank(lines[i])) {
-        let blankHasIndent = false;
-        while (i < lines.length && isBlank(lines[i])) {
-          if (lines[i].length) blankHasIndent = true;
-          i++;
-        }
-        joinNewline = blankHasIndent;
-      }
-      if (quoted && !rawTag && i === lines.length) joinNewline = false;
-      if (block) out.push(block.join('\n') + (joinNewline ? '\n' : ''));
+  let cursor = 0;
+  let parentheses = 0;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\\' && cursor + 1 < source.length) {
+      cursor += 2;
       continue;
     }
-    const fence = initial === 96 || initial === 126 ? fenceStart(line) : null;
-    if (fence) {
-      if (collecting) {
-        i++;
-        while (i < lines.length && !fenceEnd(lines[i], fence)) i++;
-        if (i < lines.length) i++;
-        continue;
-      }
-      const content = [];
-      i++;
-      const contentIndent = fence.ch === '~' ? 0 : fence.indent;
-      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFenceContent(lines[i++], contentIndent, baseIndent));
-      if (i < lines.length) i++;
-      const info = fence.info;
-      let language = '';
-      for (let n = 0; n < info.length && info[n] !== ' ' && info[n] !== '\t'; n++) language += info[n];
-      const cls = language ? ` class="language-${escapeHtml(unescapePunctuation(language), false)}"` : '';
-      const code = content.join('\n') + (content.length && content[content.length - 1] !== '' ? '\n' : '');
-      out.push(`<pre><code${cls}>${escapeHtml(code, true)}</code></pre>\n`);
-      continue;
-    }
-    if (isIndentedCode(line)) {
-      if (collecting) {
-        while (i < lines.length && (isBlank(lines[i]) || isIndentedCode(lines[i]))) i++;
-        continue;
-      }
-      const content = [];
-      while (i < lines.length) {
-        if (isBlank(lines[i])) { content.push(stripIndent(lines[i], 4)); i++; continue; }
-        if (!isIndentedCode(lines[i])) break;
-        content.push(stripIndent(lines[i], 4, !baseIndent)); i++;
-      }
-      while (content.length && content[content.length - 1] === '') content.pop();
-      out.push(`<pre><code>${escapeHtml(content.join('\n') + '\n', true)}</code></pre>\n`);
-      continue;
-    }
-    const heading = initial === 35 ? atxHeading(line) : null;
-    if (heading) { if (!collecting) out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`); i++; continue; }
-    if (i + 1 < lines.length && initial !== 62) {
-      const level = setextLevel(lines[i + 1]);
-      if (level) { if (!collecting) out.push(`<h${level}>${renderInline(trimAscii(line), refs)}</h${level}>\n`); i += 2; continue; }
-    }
-    if (initial === 62 && quoteLine(line) !== null) {
-      const quote = [];
-      let quoteFence = null;
-      let quoteBlankSeen = false;
-      while (i < lines.length) {
-        const marked = quoteLine(lines[i]);
-        if (marked !== null) {
-          let quoteColumn = quotePrefixWidth(lines[i]);
-          let markerAt = 0;
-          while (markerAt < lines[i].length && markerAt < 3 && lines[i][markerAt] === ' ') markerAt++;
-          if (lines[i][markerAt + 1] === '\t') quoteColumn++;
-          quote.push(quoteLine(marked) !== null ? marked : expandQuoteTabs(marked, quoteColumn));
-          quoteBlankSeen = isBlank(marked);
-          if (quoteFence) {
-            if (fenceEnd(marked, quoteFence)) quoteFence = null;
-          } else quoteFence = fenceStart(marked);
-          i++;
-          continue;
-        }
-        if (quoteFence) break;
-        if (!quoteBlankSeen && indentColumns(lines[i]) >= 4 && quote.length && listStart(lines[i].trimStart())) {
-          quote.push(`\\${lines[i].trimStart()}`);
-          i++;
-          continue;
-        }
-        if (!quoteBlankSeen && !isBlank(lines[i]) && !isThematic(lines[i]) && !fenceStart(lines[i]) && !listStart(lines[i]) && !atxHeading(lines[i]) && !isIndentedCode(lines[i]) && (!isHtmlBlockStart(lines[i]) || isStandaloneInlineTag(lines[i]))) {
-          quote.push(setextLevel(lines[i]) ? `    ${lines[i++]}` : lines[i++]);
-          continue;
-        }
-        break;
-      }
-      if (quote.length > 1 && isBlank(quote[quote.length - 1]) && quote[quote.length - 1].length > 0) {
-        quote[quote.length - 2] += `\n${quote.pop()}`;
-      }
-      let quoteHtml = renderBlocks(quote, refs, inListItem, quotePrefixWidth(line), false, true);
-      if (collecting) continue;
-      if (quote.length && isHtmlBlockStart(quote[0]) && !quote.some(isBlank) && quoteHtml.endsWith('\n')) quoteHtml = quoteHtml.slice(0, -1);
-      out.push(`<blockquote>\n${quoteHtml}</blockquote>\n`);
-      continue;
-    }
-    const para = [line]; i++;
-    let setext = 0;
-    while (i < lines.length && !isBlank(lines[i])) {
-      setext = setextLevel(lines[i]);
-      if (setext) { i++; break; }
-      if (trimAscii(lines[i]).toLowerCase() === '</pre>') {
-        para.push(lines[i++]);
-        continue;
-      }
-      if (isIndentedCode(lines[i]) && para.length && (para[para.length - 1].endsWith('  ') || para[para.length - 1].endsWith('\\'))) {
-        para.push(lines[i].trimStart());
-        i++;
-        continue;
-      }
-      if (isIndentedCode(lines[i]) && para.length && !isBlank(lines[i - 1])) {
-        para.push(lines[i]);
-        i++;
-        continue;
-      }
-      if (startsParagraphBlock(lines, i, inListItem) && !isIndentedUnderline(lines[i]) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) break;
-      para.push(lines[i++]);
-    }
-    if (collecting) continue;
-    if (setext) out.push(`<h${setext}>${renderInline(trimAscii(para.join('\n')), refs)}</h${setext}>\n`);
-    else {
-      const text = renderInline(para.join('\n'), refs);
-      out.push(tight ? text : `<p>${text}</p>\n`);
-    }
+    if (character === '(') parentheses++;
+    else if (character === ')' && parentheses > 0) parentheses--;
+    else if (parentheses === 0 && isSpace(character)) break;
+    cursor++;
   }
-  return out.join('');
+  if (cursor === 0 || parentheses !== 0) return null;
+  return { address: unescapePunctuation(source.slice(0, cursor)), tail: source.slice(cursor) };
 }
 
-function quoteLine(line) {
-  let i = 0;
-  while (i < line.length && i < 3 && line[i] === ' ') i++;
-  if (line[i] !== '>') return null;
-  let content = line.slice(i + 1);
-  if (content[0] === ' ') content = content.slice(1);
-  return content;
-}
-
-function quotePrefixWidth(line) {
-  let i = 0;
-  while (i < line.length && i < 3 && line[i] === ' ') i++;
-  if (line[i] !== '>') return 0;
-  return i + 1 + (line[i + 1] === ' ' ? 1 : 0);
-}
-
-function expandQuoteTabs(text, column) {
-  if (text.indexOf('\t') < 0) return text;
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\t') {
-      const width = 4 - (column % 4);
-      out += ' '.repeat(width);
-      column += width;
-    } else {
-      out += text[i];
-      column++;
-    }
-  }
-  return out;
-}
-
-function startsBlock(lines, i) {
-  const line = lines[i];
-  const indent = leadingSpaces(line);
-  if (indentColumns(line) >= 4) return true;
-  const c = line.charCodeAt(indent);
-  if (c === 35 && atxHeading(line)) return true;
-  if ((c === 96 || c === 126) && fenceStart(line)) return true;
-  if ((c === 42 || c === 45 || c === 95) && isThematic(line)) return true;
-  if (c === 62 && quoteLine(line) !== null) return true;
-  if ((c === 42 || c === 45 || c === 43 || isDigit(c)) && listStart(line)) return true;
-  if (c === 60 && isHtmlBlockStart(line)) return true;
-  return i + 1 < lines.length && setextLevel(lines[i + 1]);
-}
-
-function startsParagraphBlock(lines, i, inListItem = false) {
-  const line = lines[i];
-  const c = line.charCodeAt(leadingSpaces(line));
-  const list = c === 42 || c === 45 || c === 43 || isDigit(c) ? listStart(line) : null;
-  if (list && !lines[i].slice(list.contentIndent).trim()) return false;
-  if (c === 60 && isStandaloneInlineTag(line)) return false;
-  if (list && list.ordered && list.start !== 1 && !inListItem) return atxHeading(lines[i]) || fenceStart(lines[i]) || isThematic(lines[i]) || quoteLine(lines[i]) !== null || isIndentedCode(lines[i]) || isHtmlBlockStart(lines[i]);
-  return startsBlock(lines, i);
-}
-
-function atxHeading(line) {
-  let markerStart = 0;
-  for (; markerStart < 3 && line.charCodeAt(markerStart) === 32; markerStart++);
-  let contentStart = markerStart;
-  while (line.charCodeAt(contentStart) === 35) contentStart++;
-  const depth = contentStart - markerStart;
-  if (depth === 0 || depth > 6) return null;
-  if (contentStart < line.length && line.charCodeAt(contentStart) !== 32 && line.charCodeAt(contentStart) !== 9) return null;
-
-  let contentEnd = line.length;
-  while (contentStart < contentEnd && (line.charCodeAt(contentStart) === 32 || line.charCodeAt(contentStart) === 9)) contentStart++;
-  while (contentEnd > contentStart && (line.charCodeAt(contentEnd - 1) === 32 || line.charCodeAt(contentEnd - 1) === 9)) contentEnd--;
-  let closingStart = contentEnd;
-  while (closingStart > contentStart && line.charCodeAt(closingStart - 1) === 35) closingStart--;
-  if (closingStart < contentEnd && (closingStart === contentStart || line.charCodeAt(closingStart - 1) === 32 || line.charCodeAt(closingStart - 1) === 9)) {
-    contentEnd = closingStart;
-    while (contentEnd > contentStart && (line.charCodeAt(contentEnd - 1) === 32 || line.charCodeAt(contentEnd - 1) === 9)) contentEnd--;
-  }
-  return { level: depth, text: line.slice(contentStart, contentEnd) };
-}
-
-function setextLevel(line) {
-  if (indentColumns(line) >= 4) return 0;
-  let i = leadingSpaces(line);
-  const c = line[i];
-  if (c !== '=' && c !== '-') return 0;
-  while (line[i] === c) i++;
-  while (line[i] === ' ' || line[i] === '\t') i++;
-  return i === line.length ? (c === '=' ? 1 : 2) : 0;
-}
-
-function isIndentedUnderline(line) {
-  if (indentColumns(line) < 4) return false;
-  const text = trimAscii(line);
-  if (!text || (text[0] !== '-' && text[0] !== '=')) return false;
-  for (let i = 1; i < text.length; i++) if (text[i] !== text[0]) return false;
-  return text.length >= 3;
-}
-
-function isThematic(line) {
-  if (indentColumns(line) >= 4) return false;
-  let c = '', count = 0;
-  for (let i = 0; i < line.length; i++) {
-    if (line[i] === ' ' || line[i] === '\t') continue;
-    if (!c) c = line[i];
-    if (line[i] !== c) return false;
-    count++;
-  }
-  if (count < 3) return false;
-  return c === '*' || c === '-' || c === '_';
-}
-
-function fenceStart(line) {
-  let n = 0;
-  while (n < 4 && line[n] === ' ') n++;
-  if (n > 3 || (line[n] !== '`' && line[n] !== '~')) return null;
-  const ch = line[n]; let j = n;
-  while (j < line.length && line[j] === ch) j++;
-  if (j - n < 3) return null;
-  const info = line.slice(j).trim();
-  if (ch === '`' && info.includes('`')) return null;
-  return { ch, size: j - n, info, indent: n };
-}
-
-function fenceEnd(line, fence) {
-  let i = 0; while (i < line.length && line[i] === ' ') i++;
-  if (i > 3) return false;
-  let j = i; while (j < line.length && line[j] === fence.ch) j++;
-  return j - i >= fence.size && isBlank(line.slice(j));
-}
-
-function isIndentedCode(line) { return indentColumns(line) >= 4; }
-
-function listStart(line) {
-  let i = 0; while (i < 4 && line[i] === ' ') i++;
-  if (i > 3) return null;
-  const indent = i;
-  const marker = line[i];
-  if (marker === '*' || marker === '-' || marker === '+') {
-    let end = i + 1;
-    if (end < line.length && line[end] !== ' ' && line[end] !== '\t') return null;
-    while (line[end] === ' ' || line[end] === '\t') end++;
-    const spaces = end - i - 1;
-    const padding = spaces > 4 ? 1 : spaces;
-    const tabbed = line[i + 1] === '\t';
-    const contentIndent = tabbed ? indent + 2 : indent + 1 + (padding || 1);
-    const width = tabbed ? i + 1 : end - (spaces - (padding || spaces));
-    return { indent, ordered: false, marker, delimiter: marker, start: 1, width, contentIndent };
-  }
-  let j = i;
-  while (j < line.length && line.charCodeAt(j) >= 48 && line.charCodeAt(j) <= 57) j++;
-  if (j === i || j - i > 9 || (line[j] !== '.' && line[j] !== ')')) return null;
-  let end = j + 1;
-  if (end < line.length && line[end] !== ' ' && line[end] !== '\t') return null;
-  while (line[end] === ' ' || line[end] === '\t') end++;
-  const spaces = end - j - 1;
-  const markerWidth = j + 1 - i;
-  const padding = spaces > 4 ? 1 : spaces;
-  const contentIndent = indent + markerWidth + (padding || 1);
-  const width = i + markerWidth + (padding || spaces);
-  return { indent, ordered: true, marker: line[j], delimiter: line[j], start: Number(line.slice(i, j)), width, contentIndent };
-}
-
-function listIndentCompatible(first, marker) {
-  return marker.indent >= first.indent || (first.indent <= 3 && marker.indent <= 3);
-}
-
-function renderList(lines, start, refs, first, baseIndent = 0) {
-  const items = [];
-  let i = start;
-  let loose = false;
-  while (i < lines.length) {
-    if (isThematic(lines[i])) break;
-    if (items.length && first.indent === 0 && indentColumns(lines[i]) >= 4 && !items[items.length - 1].blockAfterBlank) {
-      const trimmed = lines[i].trimStart();
-      if (listStart(trimmed)) {
-        const item = items[items.length - 1];
-        item.push(indentColumns(lines[i]) < item.contentIndent ? `\\${trimmed}` : trimmed);
-        i++;
-        continue;
-      }
-    }
-    const marker = listStart(lines[i]);
-    if (!marker || marker.ordered !== first.ordered || marker.delimiter !== first.delimiter || !listIndentCompatible(first, marker)) break;
-    if (items.length && marker.indent >= 4 && (first.indent === 0 || marker.indent - first.indent < 2)) {
-      items[items.length - 1].push(lines[i].trimStart());
-      i++;
-      continue;
-    }
-    if (items.length && marker.indent > first.indent && marker.indent >= items[items.length - 1].contentIndent) break;
-    const item = [lines[i].slice(marker.width)];
-    item.contentIndent = marker.contentIndent;
-    item.baseIndent = baseIndent + marker.contentIndent;
-    item.nestedContentIndent = marker.contentIndent;
-    item.nestedMarkerIndent = Infinity;
-    item.hasNestedMarker = false;
-    items.push(item);
-    i++;
-    let blank = false;
-    let activeFence = fenceStart(item[0]);
-    let fenceFirstContent = !!activeFence;
-    while (i < lines.length) {
-      if (isBlank(lines[i])) {
-        if (activeFence) { item.push(''); i++; continue; }
-        let next = i;
-        while (next < lines.length && isBlank(lines[next])) next++;
-        const nextMarker = next < lines.length ? listStart(lines[next]) : null;
-        if (first.indent === 0 && next < lines.length && indentColumns(lines[next]) >= 4 && indentColumns(lines[next]) < item.contentIndent && listStart(lines[next].trimStart())) {
-          item.blockAfterBlank = true;
-          i = next;
-          break;
-        }
-        if (nextMarker && nextMarker.ordered === first.ordered && nextMarker.delimiter === first.delimiter && listIndentCompatible(first, nextMarker) && nextMarker.indent < item.contentIndent) {
-          while (i < next) item.push(''), i++;
-          loose = true;
-          break;
-        }
-        if (nextMarker && nextMarker.indent >= item.contentIndent && !item.hasNestedMarker) {
-          loose = true;
-          item.push('');
-          i = next;
-          continue;
-        }
-        if (!nextMarker && next < lines.length && indentColumns(lines[next]) >= item.contentIndent && listStart(lines[next].trimStart())) {
-          const nestedAfterBlank = listStart(lines[next].trimStart());
-          if (!item.hasNestedMarker) {
-            loose = true;
-            item.hasNestedMarker = true;
-            item.nestedContentIndent = indentColumns(lines[next]) + nestedAfterBlank.contentIndent;
-          }
-          item.push('');
-          i = next;
-          continue;
-        }
-        if (next < lines.length && indentColumns(lines[next]) >= item.contentIndent && item[0] !== '') {
-          while (i < next) item.push(''), i++;
-          const threshold = item.hasNestedMarker ? item.nestedContentIndent : item.contentIndent + 4;
-          if (!listStart(lines[next].trimStart()) && (indentColumns(lines[next]) < threshold || (isIndentedCode(lines[next]) && !item.hasNestedMarker))) blank = true;
-          continue;
-        }
-        item.blockAfterBlank = true;
-        i = next;
-        break;
-      }
-      if (activeFence) {
-        const indented = indentColumns(lines[i]) >= item.contentIndent;
-        const value = indented
-          ? stripFencedIndent(lines[i], item.contentIndent, baseIndent)
-          : lines[i];
-        if (fenceEnd(value, activeFence)) {
-          item.push(value);
-          activeFence = null;
-          i++;
-          continue;
-        }
-        if (fenceFirstContent && !indented) {
-          activeFence = null;
-          break;
-        }
-        fenceFirstContent = false;
-        item.push(value);
-        i++;
-        continue;
-      }
-      if (i < lines.length && isThematic(lines[i]) && indentColumns(lines[i]) < item.contentIndent) break;
-      const next = activeFence ? null : listStart(lines[i]);
-      if (!activeFence && lines[i][0] === '\t' && listStart(lines[i].trimStart())) {
-        item.hasNestedMarker = true;
-        item.push(stripIndent(lines[i], item.contentIndent));
-        i++;
-        continue;
-      }
-      if (!activeFence && next && next.ordered === first.ordered && next.delimiter === first.delimiter && listIndentCompatible(first, next) && next.indent < item.contentIndent) break;
-      const nestedMarker = next && next.indent >= item.contentIndent;
-      if (nestedMarker && first.indent === 3 && next.indent === item.contentIndent) {
-        item.push(lines[i].trimStart());
-        i++;
-        continue;
-      }
-      if (nestedMarker) {
-        if (next.indent <= item.nestedMarkerIndent) {
-          item.nestedMarkerIndent = next.indent;
-          item.nestedContentIndent = next.contentIndent;
-        }
-        item.hasNestedMarker = true;
-      }
-      if (indentColumns(lines[i]) >= item.contentIndent) {
-        let value = stripIndent(lines[i], item.contentIndent);
-        if (value[0] === '\t') value = ' ' + value.slice(1);
-        if (lines[i].startsWith('\t\t') && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
-        activeFence = fenceStart(value);
-        fenceFirstContent = !!activeFence;
-        const nestedFromValue = listStart(value);
-        if (!activeFence && nestedFromValue) {
-          item.hasNestedMarker = true;
-          const nestedIndent = item.contentIndent + nestedFromValue.indent;
-          if (nestedIndent <= item.nestedMarkerIndent) {
-            item.nestedMarkerIndent = nestedIndent;
-            item.nestedContentIndent = item.contentIndent + nestedFromValue.contentIndent;
-          }
-        }
-        item.push(value);
-      }
-      else if (!startsBlock(lines, i) || (isIndentedCode(lines[i]) && (indentColumns(lines[i]) < first.indent + 4 || !listStart(lines[i].trimStart())))) {
-        item.push(item[0] && indentColumns(lines[i]) < 4 ? lines[i] : lines[i].trimStart());
-      }
-      else break;
-      i++;
-    }
-    if (blank) loose = true;
-  }
-  const tag = first.ordered ? 'ol' : 'ul';
-  const attr = first.ordered && first.start !== 1 ? ` start="${first.start}"` : '';
-  const out = [`<${tag}${attr}>\n`];
-  for (const item of items) {
-    if (refs[COLLECT_REFS] && !hasReferenceSyntax(item)) continue;
-    while (item.length && isBlank(item[0])) item.shift();
-    while (item.length && isBlank(item[item.length - 1])) item.pop();
-    let task = '';
-    if (item.length && (item[0].startsWith('[ ] ') || item[0].startsWith('[x] ') || item[0].startsWith('[X] '))) {
-      const checked = item[0][1].toLowerCase() === 'x';
-      task = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox"> `;
-      item[0] = item[0].slice(4);
-    }
-    let body = loose ? renderBlocks(item, refs, true, item.baseIndent) : tightListItem(item, refs, item.baseIndent);
-    if (item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
-    const taskBody = task ? (loose ? body.replace('<p>', `<p>${task}`) : task + body) : body;
-    out.push(`<li>${taskBody}</li>\n`);
-  }
-  out.push(`</${tag}>\n`);
-  return { html: out.join(''), next: i };
-}
-
-function tightListItem(lines, refs, baseIndent) {
-  if (!lines.length) return '';
-  if (refs[COLLECT_REFS] && !hasReferenceSyntax(lines)) return '';
-  const out = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (isBlank(lines[i])) { i++; continue; }
-    if (indentColumns(lines[i]) < 4 && lines[i][leadingSpaces(lines[i])] === '[') {
-      const definition = parseReferenceDefinition(lines, i, leadingSpaces(lines[i]));
-      if (definition) { i = definition.next; continue; }
-    }
-    const heading = atxHeading(lines[i]);
-    if (heading) {
-      out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`);
-      i++;
-      continue;
-    }
-    if (startsBlock(lines, i) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) {
-      out.push(renderBlocks(lines.slice(i), refs, true, baseIndent, true)); break;
-    }
-    const p = [lines[i++]];
-    let level = 0;
-    while (i < lines.length && !isBlank(lines[i])) {
-      level = setextLevel(lines[i]);
-      if (level) { i++; break; }
-      if (startsBlock(lines, i) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) break;
-      p.push(lines[i++]);
-    }
-    const content = renderInline(p.join('\n'), refs);
-    out.push(level ? `<h${level}>${content}</h${level}>\n` : content);
-  }
-  return out.join('');
-}
-
-function hasReferenceSyntax(lines) {
-  for (let i = 0; i < lines.length; i++) if (lines[i].includes(']:')) return true;
-  return false;
-}
-
-function isHtmlBlockStart(line) {
-  if (indentColumns(line) > 3) return false;
-  const s = line.trimStart();
-  if (s.startsWith('<!--') || s.startsWith('<?') || s.startsWith('<![CDATA[') || s.startsWith('<!')) return true;
-  if (s[0] !== '<') return false;
-  let at = s[1] === '/' ? 2 : 1;
-  if (!isAlpha(s.charCodeAt(at))) return false;
-  at++;
-  while (isAlpha(s.charCodeAt(at)) || isDigit(s.charCodeAt(at)) || s[at] === '-') at++;
-  if (s[at] && s[at] !== ' ' && s[at] !== '\t' && s[at] !== '/' && s[at] !== '>') return false;
-  const tagName = s.slice(s[1] === '/' ? 2 : 1, at).toLowerCase();
-  if (HTML_BLOCK_TAGS.has(tagName)) return true;
-  return validHtmlTag(s);
-}
-
-const HTML_BLOCK_TAGS = new Set('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav ol p pre script section summary style table tbody td textarea tfoot th thead title tr track ul picture source'.split(' '));
-
-function isStandaloneInlineTag(text, name = '', end = -1) {
-  const s = text.trimStart();
-  if (s[0] !== '<') return false;
-  if (end < 0) {
-    let i = s[1] === '/' ? 2 : 1;
-    const start = i;
-    while (isAlpha(s.charCodeAt(i)) || isDigit(s.charCodeAt(i)) || s[i] === '-') i++;
-    if (i === start) return false;
-    end = i;
-    name = s.slice(start, i).toLowerCase();
-  }
-  return validHtmlTag(s) && !HTML_BLOCK_TAGS.has(name);
-}
-
-function validHtmlTag(text) {
-  if (text[text.length - 1] !== '>') return false;
-  const closing = text[1] === '/';
-  let i = closing ? 2 : 1;
-  const nameStart = i;
-  while (i < text.length - 1 && isAlpha(text.charCodeAt(i))) i++;
-  if (i === nameStart) return false;
-  if (closing) return i === text.length - 1;
-  while (i < text.length - 1) {
-    while (text[i] === ' ' || text[i] === '\t' || text[i] === '\n') i++;
-    if (i >= text.length - 1) break;
-    if (text[i] === '/') return i === text.length - 2;
-    const begin = i;
-    while (i < text.length - 1 && isAlpha(text.charCodeAt(i))) i++;
-    if (i === begin) return false;
-    while (text[i] === ' ' || text[i] === '\t' || text[i] === '\n') i++;
-    if (text[i] !== '=' && i < text.length - 1) return false;
-    i++;
-    while (text[i] === ' ' || text[i] === '\t') i++;
-    if (text[i] === '"' || text[i] === "'") {
-      const q = text[i++];
-      while (i < text.length - 1 && text[i] !== q) i++;
-      if (text[i] !== q) return false;
-      i++;
-      if (i < text.length - 1 && text[i] !== ' ' && text[i] !== '\t' && text[i] !== '\n' && text[i] !== '/') return false;
-    } else {
-      const beginValue = i;
-      while (i < text.length - 1 && text[i] !== ' ' && text[i] !== '\t' && text[i] !== '>') i++;
-      if (i === beginValue) return false;
-    }
-  }
-  return true;
-}
-
-function htmlBlockTag(line) {
-  const s = line.trimStart();
-  if (s.startsWith('<!--')) return '!--';
-  if (s.startsWith('<?')) return '?';
-  if (s.startsWith('<![CDATA[')) return '![CDATA[';
-  if (s[0] !== '<') return null;
-  let i = 1;
-  if (s[i] === '/') i++;
-  if (!isAlpha(s.charCodeAt(i))) return null;
-  const begin = i;
-  i++;
-  while (isAlpha(s.charCodeAt(i)) || isDigit(s.charCodeAt(i)) || s[i] === '-') i++;
-  return s.slice(begin, i).toLowerCase();
-}
-
-function htmlBlockEnd(line, tag) {
-  if (tag === '!--') return line.includes('-->');
-  if (tag === '?') return line.includes('?>');
-  if (tag === '![CDATA[') return line.includes(']]>');
-  return line.toLowerCase().includes(`</${tag}>`);
-}
-
-function isInlineHtml(inside) {
-  if (inside.startsWith('!--') || inside.startsWith('?') || inside.startsWith('!')) return true;
-  let i = 0;
-  const closing = inside[i] === '/';
-  if (closing) i++;
-  if (!isAlpha(inside.charCodeAt(i))) return false;
-  i++;
-  while (isAlpha(inside.charCodeAt(i)) || isDigit(inside.charCodeAt(i)) || inside[i] === '-') i++;
-  if (closing) return i === inside.length;
-  if (i < inside.length && !isSpace(inside[i]) && inside[i] !== '/') return false;
-  if (inside.includes('\n')) {
-    let quoteCount = 0;
-    for (let q = 0; q < inside.length; q++) if (inside[q] === '"' || inside[q] === "'") quoteCount++;
-    if (quoteCount & 1 || inside.slice(0, i).toLowerCase() === 'a' && inside.includes('href=')) return true;
-    if (!inside.slice(i).split('\n')[0].trim()) return true;
-    const lines = inside.split('\n');
-    for (let n = 1; n < lines.length; n++) {
-      const part = lines[n].trim();
-      if (!part || part === '/' || part.startsWith('_') || part.includes('=')) continue;
-      return false;
-    }
-    if (inside.includes('*') || inside.includes('#')) return false;
-    return true;
-  }
-  while (i < inside.length && (inside[i] === ' ' || inside[i] === '\t' || inside[i] === '\n' || inside[i] === '\r')) i++;
-  if (i === inside.length) return true;
-  if (inside[i] === '/') return i === inside.length - 1;
-  while (i < inside.length) {
-    const attrStart = i;
-    while (i < inside.length && inside[i] !== ' ' && inside[i] !== '\t' && inside[i] !== '\n' && inside[i] !== '\r' && inside[i] !== '=') {
-      const cp = inside.charCodeAt(i);
-      if (!isAlpha(cp) && !isDigit(cp) && inside[i] !== '_' && inside[i] !== ':' && inside[i] !== '.' && inside[i] !== '-') return false;
-      i++;
-    }
-    if (i === attrStart) return false;
-    if (i >= inside.length) return true;
-    const attrHasEquals = inside[i] === '=';
-    if (!attrHasEquals && inside[i] !== ' ' && inside[i] !== '\t' && inside[i] !== '\n' && inside[i] !== '\r') return false;
-    if (!attrHasEquals) {
-      while (i < inside.length && (inside[i] === ' ' || inside[i] === '\t' || inside[i] === '\n' || inside[i] === '\r')) i++;
-      if (i >= inside.length) return true;
-      if (inside[i] === '/') return i === inside.length - 1;
-      continue;
-    }
-    i++;
-    while (i < inside.length && (inside[i] === ' ' || inside[i] === '\t')) i++;
-    if (inside[i] === '"' || inside[i] === "'") {
-      const q = inside[i++];
-      while (i < inside.length && inside[i] !== q) i++;
-      if (i >= inside.length) return false;
-      i++;
-    } else {
-      const valueStart = i;
-      while (i < inside.length && inside[i] !== ' ' && inside[i] !== '\t' && inside[i] !== '\n' && inside[i] !== '\r') {
-        if (inside[i] === '<' || inside[i] === '>' || inside[i] === '`') return false;
-        i++;
-      }
-      if (i === valueStart) return false;
-    }
-    let hadSpace = false;
-    while (i < inside.length && (inside[i] === ' ' || inside[i] === '\t' || inside[i] === '\n' || inside[i] === '\r')) { hadSpace = true; i++; }
-    if (i < inside.length && !hadSpace && inside[i] !== '/') return false;
-    if (i < inside.length && inside[i] === '/') return i === inside.length - 1;
-  }
-  return true;
-}
-
-function isAutolink(inside) {
-  const schemeEnd = autolinkSchemeColon(inside);
-  if (schemeEnd !== -1) {
-    for (let position = schemeEnd + 1; position < inside.length; position++) {
-      const code = inside.charCodeAt(position);
-      if (code === 60 || code === 62 || isSpace(inside[position])) return false;
-    }
-    return true;
-  }
-  const separator = inside.lastIndexOf('@');
-  const length = inside.length;
-  if (separator <= 0 || separator + 1 === length) return false;
-  for (let position = 0; position < separator; position++) {
-    const code = inside.charCodeAt(position);
-    if (!isAlpha(code) && !isDigit(code) && !EMAIL_LOCAL[code]) return false;
-  }
-  let finalDot = -1;
-  for (let position = separator + 1; position < length; position++) {
-    const code = inside.charCodeAt(position);
-    if (code === 46) {
-      if (position === separator + 1 || position + 1 === length) return false;
-      finalDot = position;
-    } else if (code !== 45 && !isAlpha(code) && !isDigit(code)) return false;
-  }
-  if (finalDot === -1 || finalDot + 2 >= length) return false;
-  for (let position = finalDot + 1; position < length; position++) {
-    if (!isAlpha(inside.charCodeAt(position))) return false;
-  }
-  return true;
-}
-
-function autolinkSchemeColon(source) {
-  if (!isAlpha(source.charCodeAt(0))) return -1;
-  const limit = Math.min(source.length, 33);
-  for (let position = 1; position < limit; position++) {
-    const character = source.charCodeAt(position);
-    if (character === 58) return position > 1 ? position : -1;
-    if (!isAlpha(character) && !isDigit(character) && character !== 43 && character !== 45 && character !== 46) return -1;
-  }
-  return -1;
-}
-
-function isTableDelimiter(line) {
-  const cells = tableCells(line);
-  if (!cells.length) return false;
-  for (const cell of cells) {
-    let i = 0, end = cell.length;
-    while (cell[i] === ' ') i++;
-    while (end > i && cell[end - 1] === ' ') end--;
-    if (cell[i] === ':') i++;
-    let dashes = 0;
-    while (cell[i] === '-') { dashes++; i++; }
-    if (cell[i] === ':') i++;
-    if (i !== end || dashes < 1) return false;
-  }
-  return true;
-}
-
-function renderTable(lines, start, refs) {
-  const headingLine = lines[start];
-  const alignmentLine = lines[start + 1];
-  if (headingLine.indexOf('|') < 0 || alignmentLine.indexOf('|') < 0) return null;
-  const headingCells = tableCells(headingLine);
-  const alignmentCells = tableCells(alignmentLine);
-  const width = headingCells.length;
-  if (width === 0 || alignmentCells.length !== width) return null;
-
-  let cursor = start + 2;
-  if (refs[COLLECT_REFS]) {
-    for (; cursor < lines.length && tableBodyContinues(lines, cursor); cursor++);
-    return { next: cursor, html: '' };
-  }
-
-  const attributes = new Array(width);
-  for (let column = 0; column < width; column++) {
-    const marker = alignmentCells[column].trim();
-    const left = marker.charCodeAt(0) === 58;
-    const right = marker.charCodeAt(marker.length - 1) === 58;
-    let alignment = '';
-    if (left) alignment = right ? 'center' : 'left';
-    else if (right) alignment = 'right';
-    attributes[column] = alignment ? ` align="${alignment}"` : '';
-  }
-
-  const fragments = ['<table>\n<thead>\n'];
-  appendTableRow(fragments, headingCells, attributes, 'th', refs);
-  fragments.push('</thead>\n');
-  let openedBody = false;
-  for (; cursor < lines.length && tableBodyContinues(lines, cursor); cursor++) {
-    if (!openedBody) {
-      fragments.push('<tbody>');
-      openedBody = true;
-    }
-    appendTableRow(fragments, tableCells(lines[cursor]), attributes, 'td', refs);
-  }
-  if (openedBody) fragments.push('</tbody>');
-  fragments.push('</table>\n');
-  return { next: cursor, html: fragments.join('') };
-}
-
-function appendTableRow(fragments, cells, attributes, element, refs) {
-  fragments.push('<tr>\n');
-  for (let column = 0; column < attributes.length; column++) {
-    const content = trimAscii(cells[column] ?? '').replaceAll('\\|', '|');
-    fragments.push('<', element, attributes[column], '>', renderInline(content, refs), '</', element, '>\n');
-  }
-  fragments.push('</tr>\n');
-}
-
-function tableBodyContinues(lines, i) {
-  const line = lines[i];
-  if (isBlank(line)) return line.includes('\t');
-  return !startsBlock(lines, i) || line.includes('|') || (i + 1 < lines.length && setextLevel(lines[i + 1]));
-}
-
-function tableCells(line) {
+function readDefinitionTitle(lines, row, source) {
+  if (!beginsReferenceTitle(source)) return null;
+  const delimiter = source[0] === '(' ? ')' : source[0];
   const pieces = [];
-  let begin = 0;
-  let pipe = line.indexOf('|');
-  while (pipe !== -1) {
-    let escaped = false;
-    for (let before = pipe - 1; before >= begin && line.charCodeAt(before) === 92; before--) escaped = !escaped;
-    if (!escaped) {
-      pieces.push(line.slice(begin, pipe));
-      begin = pipe + 1;
+  let begin = 1;
+  for (;;) {
+    const limit = seekTitleDelimiter(source, begin, delimiter);
+    if (limit >= 0) {
+      if (trimAscii(source.slice(limit + 1))) return null;
+      pieces.push(source.slice(begin, limit));
+      return { caption: unescapePunctuation(pieces.join('\n')), lastRow: row };
     }
-    pipe = line.indexOf('|', pipe + 1);
+    pieces.push(source.slice(begin));
+    if (row + 1 === lines.length || isBlank(lines[row + 1])) return null;
+    source = lines[++row];
+    begin = 0;
   }
-  pieces.push(line.slice(begin));
-  if (pieces.length > 1 && !pieces[0].trim()) pieces.shift();
-  if (pieces.length > 1 && !pieces[pieces.length - 1].trim()) pieces.pop();
-  return pieces;
 }
 
-function findStrikeClose(text, start, refs) {
-  let depth = 1;
-  for (let i = start + 2; i < text.length;) {
-    if (text[i] === '\\') { i += Math.min(2, text.length - i); continue; }
-    if (text[i] === '`') {
-      const ticks = delimiterRunLength(text, i, '`');
-      const end = findCodeClosing(text, i + ticks, '`'.repeat(ticks));
-      i = end < 0 ? i + ticks : end + ticks;
-      continue;
-    }
-    if (text[i] === '<') {
-      const end = inlineTagEnd(text, i);
-      if (end >= 0) { i = end + 1; continue; }
-    }
-    if (text[i] === '[' || (text[i] === '!' && text[i + 1] === '[')) {
-      const link = parseLink(text, i, refs, true);
-      if (link) { i = link.end; continue; }
-    }
-    if (text[i] !== '~') { i++; continue; }
-    let run = 1;
-    while (text[i + run] === '~') run++;
-    if (run === 2) {
-      const canOpen = !isSpace(text[i + 2]);
-      const canClose = i > 0 && !isSpace(text[i - 1]);
-      if (canClose) {
-        if (depth === 1) return i;
-        depth--;
-      } else if (canOpen) depth++;
-    }
-    i += run;
+function leadingSpaces(source) {
+  let length = 0;
+  while (source.charCodeAt(length) === 32 || source.charCodeAt(length) === 9) length++;
+  return length;
+}
+
+function seekUnescapedSequence(source, sequence, from = 0) {
+  let match = source.indexOf(sequence, from);
+  while (match !== -1) {
+    let backslashes = 0;
+    let preceding = match;
+    while (preceding > 0 && source.charCodeAt(--preceding) === 92) backslashes++;
+    if (backslashes % 2 === 0) return match;
+    match = source.indexOf(sequence, match + sequence.length);
   }
   return -1;
 }
 
-function renderInline(text, refs, suppressBareUrls = false) {
-  if (refs[COLLECT_REFS]) return '';
-  const out = [];
-  const codeMask = inlineCodeMask(text);
-  const lastEmailAt = text.lastIndexOf('@');
-  let i = 0;
-  let literalLabelEnd = -1;
-  while (i < text.length) {
-    const c = text[i];
-    const initial = text.charCodeAt(i);
-    if (!INLINE_SPECIAL[initial]) {
-      const bare = !suppressBareUrls && !refs[IN_RAW_LINK];
-      if (bare && ((initial | 32) === 104 || initial === 119 || (i < lastEmailAt && isAlpha(initial))) && (i === 0 || !isWord(text[i - 1]))) {
-        const url = extendedUrlAt(text, i, i < lastEmailAt);
-        if (url) {
-          out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`);
-          i = url.end;
+function beginsReferenceTitle(source) {
+  const code = source.charCodeAt(0);
+  return code === 40 || code === 34 || code === 39;
+}
+
+function seekTitleDelimiter(source, from, delimiter) {
+  let cursor = from;
+  while (cursor < source.length) {
+    if (source[cursor] === '\\' && cursor + 1 < source.length) cursor += 2;
+    else if (source[cursor] === delimiter) return cursor;
+    else cursor++;
+  }
+  return -1;
+}
+
+function unescapePunctuation(source) {
+  let rendered = '';
+  let begin = 0;
+  let backslash = source.indexOf('\\');
+  while (backslash !== -1) {
+    if (backslash + 1 < source.length && PUNCT.includes(source[backslash + 1])) {
+      rendered += source.slice(begin, backslash) + source[backslash + 1];
+      begin = backslash + 2;
+      backslash = source.indexOf('\\', begin);
+    } else backslash = source.indexOf('\\', backslash + 1);
+  }
+  return begin === 0 ? source : rendered + source.slice(begin);
+}
+
+function renderBlocks(rows, references, withinItem = false, parentColumn = 0, compact = false, insideQuote = false) {
+  const definitionsOnly = references[COLLECT_REFS];
+  if (definitionsOnly && !hasReferenceSyntax(rows)) return '';
+  const fragments = [];
+  let cursor = 0;
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    if (isBlank(source)) {
+      cursor++;
+      continue;
+    }
+    const margin = leadingSpaces(source);
+    const first = source.charCodeAt(margin);
+    if (first === 91 && !isIndentedCode(source)) {
+      const definition = parseReferenceDefinition(rows, cursor, margin);
+      if (definition && saveReference(references, definition)) {
+        cursor = definition.next;
+        continue;
+      }
+    }
+    if ((first === 95 || first === 45 || first === 42) && isThematic(source)) {
+      if (!definitionsOnly) fragments.push('<hr>\n');
+      cursor++;
+      continue;
+    }
+    const marker = first === 43 || first === 45 || first === 42 || isDigit(first) ? listStart(source) : null;
+    if (marker) {
+      const listResult = renderList(rows, cursor, references, marker, parentColumn);
+      fragments.push(listResult.html);
+      cursor = listResult.next;
+      continue;
+    }
+    if (cursor + 1 < rows.length && source.includes('|') && isTableDelimiter(rows[cursor + 1])) {
+      const tableResult = renderTable(rows, cursor, references);
+      if (tableResult) {
+        fragments.push(tableResult.html);
+        cursor = tableResult.next;
+        continue;
+      }
+    }
+    if (first === 60 && isHtmlBlockStart(source)) {
+      const htmlRegion = takeHtmlBlock(rows, cursor, definitionsOnly, insideQuote);
+      fragments.push(htmlRegion.html);
+      cursor = htmlRegion.next;
+      continue;
+    }
+    const opening = first === 126 || first === 96 ? fenceStart(source) : null;
+    if (opening) {
+      const codeRegion = takeFencedCode(rows, cursor, opening, parentColumn, definitionsOnly);
+      fragments.push(codeRegion.html);
+      cursor = codeRegion.next;
+      continue;
+    }
+    if (isIndentedCode(source)) {
+      const codeRegion = takeIndentedCode(rows, cursor, parentColumn, definitionsOnly);
+      fragments.push(codeRegion.html);
+      cursor = codeRegion.next;
+      continue;
+    }
+    const heading = first === 35 ? atxHeading(source) : null;
+    if (heading) {
+      if (!definitionsOnly) fragments.push(blockHeadingHtml(heading.level, heading.text, references));
+      cursor++;
+      continue;
+    }
+    if (first !== 62 && cursor + 1 < rows.length) {
+      const underline = setextLevel(rows[cursor + 1]);
+      if (underline) {
+        if (!definitionsOnly) fragments.push(blockHeadingHtml(underline, trimAscii(source), references));
+        cursor += 2;
+        continue;
+      }
+    }
+    if (first === 62 && quoteLine(source) !== null) {
+      const quoteRegion = takeBlockQuote(rows, cursor, references, withinItem, definitionsOnly);
+      fragments.push(quoteRegion.html);
+      cursor = quoteRegion.next;
+      continue;
+    }
+    const paragraph = takeParagraph(rows, cursor, withinItem);
+    cursor = paragraph.next;
+    if (definitionsOnly) continue;
+    const content = paragraph.content.join('\n');
+    if (paragraph.level) {
+      fragments.push(blockHeadingHtml(paragraph.level, trimAscii(content), references));
+    } else {
+      const body = renderInline(content, references);
+      fragments.push(compact ? body : '<p>' + body + '</p>\n');
+    }
+  }
+  return fragments.join('');
+}
+
+function takeParagraph(rows, start, withinItem) {
+  const captured = [rows[start]];
+  let cursor = start + 1;
+  let underline = 0;
+  while (cursor < rows.length && !isBlank(rows[cursor])) {
+    const source = rows[cursor];
+    underline = setextLevel(source);
+    if (underline) {
+      cursor++;
+      break;
+    }
+    if (trimAscii(source).toLowerCase() === '</pre>') {
+      captured.push(source);
+      cursor++;
+      continue;
+    }
+    if (isIndentedCode(source)) {
+      const preceding = captured[captured.length - 1];
+      if (preceding.endsWith('  ') || preceding.endsWith('\\')) {
+        captured.push(source.trimStart());
+        cursor++;
+        continue;
+      }
+      if (!isBlank(rows[cursor - 1])) {
+        captured.push(source);
+        cursor++;
+        continue;
+      }
+    }
+    const followedByUnderline = cursor + 1 < rows.length && setextLevel(rows[cursor + 1]);
+    if (startsParagraphBlock(rows, cursor, withinItem) && !isIndentedUnderline(source) && !followedByUnderline) break;
+    captured.push(source);
+    cursor++;
+  }
+  return { next: cursor, level: underline, content: captured };
+}
+
+function blockHeadingHtml(level, source, references) {
+  return '<h' + level + '>' + renderInline(source, references) + '</h' + level + '>\n';
+}
+
+function takeFencedCode(rows, start, opening, parentColumn, definitionsOnly) {
+  const captured = definitionsOnly ? null : [];
+  const margin = opening.ch === '~' ? 0 : opening.indent;
+  let cursor = start + 1;
+  for (; cursor < rows.length && !fenceEnd(rows[cursor], opening); cursor++) {
+    if (captured) captured.push(stripFenceContent(rows[cursor], margin, parentColumn));
+  }
+  if (cursor < rows.length) cursor++;
+  if (captured === null) return { next: cursor, html: '' };
+
+  let languageEnd = 0;
+  while (languageEnd < opening.info.length && opening.info[languageEnd] !== '\t' && opening.info[languageEnd] !== ' ') languageEnd++;
+  const language = opening.info.slice(0, languageEnd);
+  const attribute = language.length ? ' class="language-' + escapeHtml(unescapePunctuation(language)) + '"' : '';
+  let body = captured.join('\n');
+  if (captured.length > 0 && captured[captured.length - 1] !== '') body += '\n';
+  return { next: cursor, html: '<pre><code' + attribute + '>' + escapeHtml(body, true) + '</code></pre>\n' };
+}
+
+function takeIndentedCode(rows, start, parentColumn, definitionsOnly) {
+  const captured = definitionsOnly ? null : [];
+  let cursor = start;
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    const blank = isBlank(source);
+    if (!blank && !isIndentedCode(source)) break;
+    if (captured) captured.push(blank ? stripIndent(source, 4) : stripIndent(source, 4, !parentColumn));
+    cursor++;
+  }
+  if (captured === null) return { next: cursor, html: '' };
+  while (captured.length > 0 && captured[captured.length - 1] === '') captured.pop();
+  const body = escapeHtml(captured.join('\n') + '\n', true);
+  return { next: cursor, html: '<pre><code>' + body + '</code></pre>\n' };
+}
+
+function takeHtmlBlock(rows, start, definitionsOnly, insideQuote) {
+  const kind = htmlBlockTag(rows[start]);
+  const explicitEnd = kind === '!--' || kind === '?' || kind === '![CDATA['
+    || kind === 'script' || kind === 'style' || kind === 'pre' || kind === 'textarea';
+  const captured = definitionsOnly ? null : [rows[start]];
+  let cursor = start + 1;
+  let blankTerminated = false;
+  if (explicitEnd) {
+    if (!htmlBlockEnd(rows[start], kind)) {
+      while (cursor < rows.length) {
+        const source = rows[cursor++];
+        if (captured) captured.push(source);
+        if (htmlBlockEnd(source, kind)) break;
+      }
+    }
+  } else {
+    for (; cursor < rows.length && !isBlank(rows[cursor]); cursor++) {
+      if (captured) captured.push(rows[cursor]);
+    }
+    blankTerminated = cursor < rows.length;
+  }
+
+  let addNewline = !blankTerminated;
+  if (explicitEnd && cursor < rows.length && isBlank(rows[cursor])) {
+    addNewline = false;
+    do {
+      if (rows[cursor].length > 0) addNewline = true;
+      cursor++;
+    } while (cursor < rows.length && isBlank(rows[cursor]));
+  }
+  if (insideQuote && !explicitEnd && cursor === rows.length) addNewline = false;
+  return { next: cursor, html: captured ? captured.join('\n') + (addNewline ? '\n' : '') : '' };
+}
+
+function takeBlockQuote(rows, start, references, withinItem, definitionsOnly) {
+  const captured = [];
+  let cursor = start;
+  let openFence = null;
+  let lastMarkedBlank = false;
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    const content = quoteLine(source);
+    if (content !== null) {
+      let column = quotePrefixWidth(source);
+      let marker = 0;
+      while (marker < 3 && source[marker] === ' ') marker++;
+      if (source[marker + 1] === '\t') column++;
+      captured.push(quoteLine(content) === null ? expandQuotedTabs(content, column) : content);
+      lastMarkedBlank = isBlank(content);
+      if (openFence === null) openFence = fenceStart(content);
+      else if (fenceEnd(content, openFence)) openFence = null;
+      cursor++;
+      continue;
+    }
+    if (openFence || lastMarkedBlank) break;
+    if (isIndentedCode(source) && captured.length > 0 && listStart(source.trimStart())) {
+      captured.push('\\' + source.trimStart());
+      cursor++;
+      continue;
+    }
+    if (!quoteAcceptsLazyLine(source)) break;
+    captured.push((setextLevel(source) ? '    ' : '') + source);
+    cursor++;
+  }
+
+  const finalRow = captured[captured.length - 1];
+  if (captured.length > 1 && finalRow.length > 0 && isBlank(finalRow)) {
+    captured.pop();
+    captured[captured.length - 1] += '\n' + finalRow;
+  }
+  let body = renderBlocks(captured, references, withinItem, quotePrefixWidth(rows[start]), false, true);
+  if (definitionsOnly) return { next: cursor, html: '' };
+  if (captured.length && isHtmlBlockStart(captured[0]) && !captured.some(isBlank) && body.endsWith('\n')) {
+    body = body.slice(0, -1);
+  }
+  return { next: cursor, html: '<blockquote>\n' + body + '</blockquote>\n' };
+}
+
+function quoteAcceptsLazyLine(source) {
+  return !isBlank(source) && !isThematic(source) && !fenceStart(source)
+    && !listStart(source) && !atxHeading(source) && !isIndentedCode(source)
+    && (!isHtmlBlockStart(source) || isStandaloneInlineTag(source));
+}
+
+function quotePrefixWidth(source) {
+  let marker = 0;
+  while (marker < 3 && source[marker] === ' ') marker++;
+  if (source[marker] !== '>') return 0;
+  return marker + (source[marker + 1] === ' ' ? 2 : 1);
+}
+
+function quoteLine(source) {
+  const width = quotePrefixWidth(source);
+  return width > 0 ? source.slice(width) : null;
+}
+
+function expandQuotedTabs(source, initialColumn) {
+  if (!source.includes('\t')) return source;
+  let rendered = '';
+  let column = initialColumn;
+  for (let cursor = 0; cursor < source.length; cursor++) {
+    const width = source[cursor] === '\t' ? 4 - column % 4 : 1;
+    rendered += source[cursor] === '\t' ? ' '.repeat(width) : source[cursor];
+    column += width;
+  }
+  return rendered;
+}
+
+function isIndentedCode(source) {
+  return indentColumns(source) >= 4;
+}
+
+function fenceEnd(source, opening) {
+  let margin = 0;
+  while (source[margin] === ' ') margin++;
+  if (margin > 3) return false;
+  let limit = margin;
+  while (source[limit] === opening.ch) limit++;
+  if (limit - margin < opening.size) return false;
+  return isBlank(source.slice(limit));
+}
+
+function fenceStart(source) {
+  let margin = 0;
+  while (margin < 4 && source[margin] === ' ') margin++;
+  const delimiter = source[margin];
+  if (margin === 4 || (delimiter !== '~' && delimiter !== '`')) return null;
+  let limit = margin;
+  do { limit++; } while (source[limit] === delimiter);
+  const length = limit - margin;
+  if (length < 3) return null;
+  const annotation = source.slice(limit).trim();
+  if (delimiter === '`' && annotation.includes('`')) return null;
+  return { ch: delimiter, size: length, info: annotation, indent: margin };
+}
+
+function isThematic(source) {
+  if (isIndentedCode(source)) return false;
+  let marker;
+  let repetitions = 0;
+  for (const character of source) {
+    if (character === '\t' || character === ' ') continue;
+    if (marker === undefined) {
+      if (character !== '*' && character !== '-' && character !== '_') return false;
+      marker = character;
+    }
+    if (character !== marker) return false;
+    repetitions++;
+  }
+  return repetitions >= 3;
+}
+
+function isIndentedUnderline(source) {
+  if (!isIndentedCode(source)) return false;
+  const body = trimAscii(source);
+  if (body.length < 3 || (body[0] !== '=' && body[0] !== '-')) return false;
+  let cursor = body.length;
+  while (--cursor > 0) if (body[cursor] !== body[0]) return false;
+  return true;
+}
+
+function setextLevel(source) {
+  if (isIndentedCode(source)) return 0;
+  let cursor = leadingSpaces(source);
+  const marker = source[cursor];
+  if (marker !== '-' && marker !== '=') return 0;
+  do { cursor++; } while (source[cursor] === marker);
+  if (!isBlank(source.slice(cursor))) return 0;
+  return marker === '-' ? 2 : 1;
+}
+
+function atxHeading(source) {
+  let margin = 0;
+  while (margin < 3 && source[margin] === ' ') margin++;
+  let first = margin;
+  while (source[first] === '#') first++;
+  const level = first - margin;
+  if (level < 1 || level > 6) return null;
+  if (first < source.length && source[first] !== ' ' && source[first] !== '\t') return null;
+
+  first += leadingSpaces(source.slice(first));
+  let last = source.length;
+  while (last > first && (source[last - 1] === '\t' || source[last - 1] === ' ')) last--;
+  let hashes = last;
+  while (hashes > first && source[hashes - 1] === '#') hashes--;
+  const separated = hashes === first || source[hashes - 1] === ' ' || source[hashes - 1] === '\t';
+  if (hashes < last && separated) {
+    last = hashes;
+    while (last > first && (source[last - 1] === '\t' || source[last - 1] === ' ')) last--;
+  }
+  return { level, text: source.slice(first, last) };
+}
+
+function startsBlock(rows, row) {
+  const source = rows[row];
+  if (isIndentedCode(source)) return true;
+  const first = source.charCodeAt(leadingSpaces(source));
+  switch (first) {
+    case 35:
+      if (atxHeading(source)) return true;
+      break;
+    case 96: case 126:
+      if (fenceStart(source)) return true;
+      break;
+    case 42: case 45: case 95:
+      if (isThematic(source)) return true;
+      if (first !== 95 && listStart(source)) return true;
+      break;
+    case 43:
+      if (listStart(source)) return true;
+      break;
+    case 62:
+      if (quoteLine(source) !== null) return true;
+      break;
+    case 60:
+      if (isHtmlBlockStart(source)) return true;
+      break;
+    default:
+      if (isDigit(first) && listStart(source)) return true;
+  }
+  return row + 1 < rows.length && setextLevel(rows[row + 1]);
+}
+
+function startsParagraphBlock(rows, row, inListItem = false) {
+  const source = rows[row];
+  const first = source.charCodeAt(leadingSpaces(source));
+  const candidate = first === 43 || first === 45 || first === 42 || isDigit(first) ? listStart(source) : null;
+  if (candidate && source.slice(candidate.contentIndent).trim().length === 0) return false;
+  if (first === 60 && isStandaloneInlineTag(source)) return false;
+  if (!inListItem && candidate && candidate.ordered && candidate.start !== 1) {
+    return atxHeading(source) || fenceStart(source) || isThematic(source)
+      || quoteLine(source) !== null || isIndentedCode(source) || isHtmlBlockStart(source);
+  }
+  return startsBlock(rows, row);
+}
+
+function listStart(source) {
+  let margin = 0;
+  while (margin < 4 && source[margin] === ' ') margin++;
+  if (margin === 4) return null;
+
+  const bullet = source[margin] === '+' || source[margin] === '-' || source[margin] === '*';
+  let separator = margin;
+  if (!bullet) {
+    while (separator < source.length && isDigit(source.charCodeAt(separator))) separator++;
+    const digits = separator - margin;
+    if (digits < 1 || digits > 9 || (source[separator] !== ')' && source[separator] !== '.')) return null;
+  }
+  const afterMarker = separator + 1;
+  if (afterMarker < source.length && source[afterMarker] !== '\t' && source[afterMarker] !== ' ') return null;
+  const gap = leadingSpaces(source.slice(afterMarker));
+  const padding = gap > 4 ? 1 : gap;
+  const bulletTab = bullet && source[afterMarker] === '\t';
+  const delimiter = source[separator];
+  return {
+    indent: margin,
+    ordered: !bullet,
+    marker: delimiter,
+    delimiter,
+    start: bullet ? 1 : Number(source.slice(margin, separator)),
+    width: bulletTab ? afterMarker : afterMarker + (padding || gap),
+    contentIndent: bulletTab ? margin + 2 : afterMarker + (padding || 1)
+  };
+}
+
+function listIndentCompatible(opening, candidate) {
+  if (candidate.indent >= opening.indent) return true;
+  return opening.indent <= 3 && candidate.indent <= 3;
+}
+
+function matchesList(opening, candidate) {
+  return candidate && candidate.ordered === opening.ordered
+    && candidate.delimiter === opening.delimiter && listIndentCompatible(opening, candidate);
+}
+
+function renderList(rows, start, references, opening, parentColumn = 0) {
+  const entries = [];
+  let cursor = start;
+  let separated = false;
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    if (isThematic(source)) break;
+    const previous = entries[entries.length - 1];
+    if (previous && opening.indent === 0 && indentColumns(source) >= 4 && !previous.blockAfterBlank) {
+      const unindented = source.trimStart();
+      if (listStart(unindented)) {
+        previous.push((indentColumns(source) < previous.contentIndent ? '\\' : '') + unindented);
+        cursor++;
+        continue;
+      }
+    }
+    const marker = listStart(source);
+    if (!matchesList(opening, marker)) break;
+    if (previous && marker.indent >= 4 && (opening.indent === 0 || marker.indent - opening.indent < 2)) {
+      previous.push(source.trimStart());
+      cursor++;
+      continue;
+    }
+    if (previous && marker.indent > opening.indent && marker.indent >= previous.contentIndent) break;
+    const entry = [source.slice(marker.width)];
+    Object.assign(entry, {
+      contentIndent: marker.contentIndent,
+      baseIndent: parentColumn + marker.contentIndent,
+      nestedContentIndent: marker.contentIndent,
+      nestedMarkerIndent: Infinity,
+      hasNestedMarker: false
+    });
+    entries.push(entry);
+    const continuation = extendListEntry(rows, cursor + 1, entry, opening, parentColumn);
+    cursor = continuation.next;
+    if (continuation.loose) separated = true;
+  }
+  return { next: cursor, html: renderListEntries(entries, references, opening, separated) };
+}
+
+function extendListEntry(rows, start, entry, opening, parentColumn) {
+  let cursor = start;
+  let separated = false;
+  let openFence = fenceStart(entry[0]);
+  let fenceNeedsContent = Boolean(openFence);
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    if (isBlank(source)) {
+      if (openFence) {
+        entry.push('');
+        cursor++;
+        continue;
+      }
+      const gap = listBlankGap(rows, cursor, entry, opening);
+      cursor = gap.next;
+      if (gap.loose) separated = true;
+      if (gap.stop) break;
+      continue;
+    }
+
+    const margin = indentColumns(source);
+    if (openFence) {
+      const indented = margin >= entry.contentIndent;
+      const content = indented ? stripFencedIndent(source, entry.contentIndent, parentColumn) : source;
+      if (fenceEnd(content, openFence)) {
+        openFence = null;
+      } else {
+        if (fenceNeedsContent && !indented) break;
+        fenceNeedsContent = false;
+      }
+      entry.push(content);
+      cursor++;
+      continue;
+    }
+    if (isThematic(source) && margin < entry.contentIndent) break;
+    const marker = listStart(source);
+    if (source[0] === '\t' && listStart(source.trimStart())) {
+      entry.hasNestedMarker = true;
+      entry.push(stripIndent(source, entry.contentIndent));
+      cursor++;
+      continue;
+    }
+    if (matchesList(opening, marker) && marker.indent < entry.contentIndent) break;
+    if (marker && marker.indent >= entry.contentIndent) {
+      if (opening.indent === 3 && marker.indent === entry.contentIndent) {
+        entry.push(source.trimStart());
+        cursor++;
+        continue;
+      }
+      noteNestedMarker(entry, marker.indent, marker.contentIndent);
+    }
+    if (margin >= entry.contentIndent) {
+      let content = stripIndent(source, entry.contentIndent);
+      if (content[0] === '\t') content = ' ' + content.slice(1);
+      if (source.startsWith('\t\t') && entry.contentIndent < 4) content = '      ' + source.trimStart();
+      openFence = fenceStart(content);
+      fenceNeedsContent = Boolean(openFence);
+      const nested = listStart(content);
+      if (!openFence && nested) {
+        noteNestedMarker(entry, entry.contentIndent + nested.indent, entry.contentIndent + nested.contentIndent);
+      }
+      entry.push(content);
+    } else {
+      const indentedContinuation = isIndentedCode(source)
+        && (margin < opening.indent + 4 || !listStart(source.trimStart()));
+      if (startsBlock(rows, cursor) && !indentedContinuation) break;
+      entry.push(entry[0] && margin < 4 ? source : source.trimStart());
+    }
+    cursor++;
+  }
+  return { next: cursor, loose: separated };
+}
+
+function noteNestedMarker(entry, margin, contentColumn) {
+  entry.hasNestedMarker = true;
+  if (margin > entry.nestedMarkerIndent) return;
+  entry.nestedMarkerIndent = margin;
+  entry.nestedContentIndent = contentColumn;
+}
+
+function renderListEntries(entries, references, opening, separated) {
+  const element = opening.ordered ? 'ol' : 'ul';
+  const startAttribute = opening.ordered && opening.start !== 1 ? ' start="' + opening.start + '"' : '';
+  const fragments = ['<' + element + startAttribute + '>\n'];
+  for (const entry of entries) {
+    if (references[COLLECT_REFS] && !hasReferenceSyntax(entry)) continue;
+    while (entry.length > 0 && isBlank(entry[0])) entry.shift();
+    while (entry.length > 0 && isBlank(entry[entry.length - 1])) entry.pop();
+
+    let checkbox = '';
+    if (entry.length > 0) {
+      const prefix = entry[0].slice(0, 4);
+      if (prefix === '[ ] ' || prefix === '[x] ' || prefix === '[X] ') {
+        checkbox = '<input ' + (prefix[1] === ' ' ? '' : 'checked="" ') + 'disabled="" type="checkbox"> ';
+        entry[0] = entry[0].slice(4);
+      }
+    }
+    let body = separated
+      ? renderBlocks(entry, references, true, entry.baseIndent)
+      : tightListItem(entry, references, entry.baseIndent);
+    if (entry.length === 1 && isHtmlBlockStart(entry[0]) && body.endsWith('\n')) body = body.slice(0, -1);
+    if (checkbox) body = separated ? body.replace('<p>', '<p>' + checkbox) : checkbox + body;
+    fragments.push('<li>' + body + '</li>\n');
+  }
+  fragments.push('</' + element + '>\n');
+  return fragments.join('');
+}
+
+function listBlankGap(rows, start, entry, opening) {
+  let next = start;
+  while (next < rows.length && isBlank(rows[next])) next++;
+  const following = next < rows.length ? rows[next] : null;
+  const marker = following === null ? null : listStart(following);
+  const margin = following === null ? -1 : indentColumns(following);
+
+  if (opening.indent === 0 && margin >= 4 && margin < entry.contentIndent && listStart(following.trimStart())) {
+    entry.blockAfterBlank = true;
+    return { next, stop: true, loose: false };
+  }
+  if (matchesList(opening, marker) && marker.indent < entry.contentIndent) {
+    for (let row = start; row < next; row++) entry.push('');
+    return { next, stop: true, loose: true };
+  }
+  if (marker && marker.indent >= entry.contentIndent && !entry.hasNestedMarker) {
+    entry.push('');
+    return { next, stop: false, loose: true };
+  }
+  if (!marker && following !== null && margin >= entry.contentIndent) {
+    const nested = listStart(following.trimStart());
+    if (nested) {
+      const newlyNested = !entry.hasNestedMarker;
+      if (newlyNested) {
+        entry.hasNestedMarker = true;
+        entry.nestedContentIndent = margin + nested.contentIndent;
+      }
+      entry.push('');
+      return { next, stop: false, loose: newlyNested };
+    }
+  }
+  if (following !== null && margin >= entry.contentIndent && entry[0] !== '') {
+    for (let row = start; row < next; row++) entry.push('');
+    const threshold = entry.hasNestedMarker ? entry.nestedContentIndent : entry.contentIndent + 4;
+    const loose = !listStart(following.trimStart())
+      && (margin < threshold || (isIndentedCode(following) && !entry.hasNestedMarker));
+    return { next, stop: false, loose };
+  }
+  entry.blockAfterBlank = true;
+  return { next, stop: true, loose: false };
+}
+
+function hasReferenceSyntax(rows) {
+  for (const source of rows) if (source.indexOf(']:') !== -1) return true;
+  return false;
+}
+
+function tightListItem(rows, references, parentColumn) {
+  if (rows.length === 0 || (references[COLLECT_REFS] && !hasReferenceSyntax(rows))) return '';
+  const fragments = [];
+  let cursor = 0;
+  while (cursor < rows.length) {
+    const source = rows[cursor];
+    if (isBlank(source)) {
+      cursor++;
+      continue;
+    }
+    const margin = leadingSpaces(source);
+    if (!isIndentedCode(source) && source[margin] === '[') {
+      const definition = parseReferenceDefinition(rows, cursor, margin);
+      if (definition) {
+        cursor = definition.next;
+        continue;
+      }
+    }
+    const heading = atxHeading(source);
+    if (heading) {
+      const body = renderInline(heading.text, references);
+      fragments.push('<h' + heading.level + '>' + body + '</h' + heading.level + '>\n');
+      cursor++;
+      continue;
+    }
+    if (listItemBlockBoundary(rows, cursor)) {
+      fragments.push(renderBlocks(rows.slice(cursor), references, true, parentColumn, true));
+      break;
+    }
+
+    const paragraph = [rows[cursor++]];
+    let underline = 0;
+    for (; cursor < rows.length && !isBlank(rows[cursor]); cursor++) {
+      underline = setextLevel(rows[cursor]);
+      if (underline) {
+        cursor++;
+        break;
+      }
+      if (listItemBlockBoundary(rows, cursor)) break;
+      paragraph.push(rows[cursor]);
+    }
+    const body = renderInline(paragraph.join('\n'), references);
+    fragments.push(underline ? '<h' + underline + '>' + body + '</h' + underline + '>\n' : body);
+  }
+  return fragments.join('');
+}
+
+function listItemBlockBoundary(rows, row) {
+  return startsBlock(rows, row) && !(row + 1 < rows.length && setextLevel(rows[row + 1]));
+}
+
+const BLOCK_TAG_NAMES = new Set([
+  'html', 'head', 'body', 'title', 'base', 'basefont', 'link',
+  'header', 'footer', 'main', 'nav', 'section', 'article', 'aside', 'address',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'hr', 'pre', 'div', 'center',
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'dir', 'menu', 'menuitem',
+  'table', 'caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+  'details', 'summary', 'dialog', 'figure', 'figcaption', 'form', 'fieldset', 'legend',
+  'iframe', 'script', 'style', 'textarea', 'picture', 'source', 'track'
+]);
+
+function htmlNameLimit(source, begin) {
+  let cursor = begin;
+  while (isAlpha(source.charCodeAt(cursor)) || isDigit(source.charCodeAt(cursor)) || source[cursor] === '-') cursor++;
+  return cursor;
+}
+
+function isHtmlBlockStart(source) {
+  if (indentColumns(source) > 3) return false;
+  const tag = source.trimStart();
+  if (tag[0] !== '<') return false;
+  if (tag.startsWith('<!') || tag.startsWith('<?')) return true;
+  const begin = tag[1] === '/' ? 2 : 1;
+  if (!isAlpha(tag.charCodeAt(begin))) return false;
+  const limit = htmlNameLimit(tag, begin + 1);
+  const boundary = tag[limit];
+  if (boundary && boundary !== ' ' && boundary !== '\t' && boundary !== '>' && boundary !== '/') return false;
+  const name = tag.slice(begin, limit).toLowerCase();
+  return BLOCK_TAG_NAMES.has(name) || completeHtmlTag(tag);
+}
+
+function isStandaloneInlineTag(source, name = '', end = -1) {
+  const tag = source.trimStart();
+  if (tag[0] !== '<') return false;
+  if (end < 0) {
+    const begin = tag[1] === '/' ? 2 : 1;
+    const limit = htmlNameLimit(tag, begin);
+    if (limit === begin) return false;
+    name = tag.slice(begin, limit).toLowerCase();
+  }
+  return completeHtmlTag(tag) && !BLOCK_TAG_NAMES.has(name);
+}
+
+function tagWhitespaceLimit(source, begin, allowNewline) {
+  let cursor = begin;
+  while (source[cursor] === ' ' || source[cursor] === '\t' || (allowNewline && source[cursor] === '\n')) cursor++;
+  return cursor;
+}
+
+function completeHtmlTag(source) {
+  const last = source.length - 1;
+  if (source[last] !== '>') return false;
+  const closing = source[1] === '/';
+  let cursor = closing ? 2 : 1;
+  const begin = cursor;
+  while (cursor < last && isAlpha(source.charCodeAt(cursor))) cursor++;
+  if (cursor === begin) return false;
+  if (closing) return cursor === last;
+
+  while (cursor < last) {
+    cursor = tagWhitespaceLimit(source, cursor, true);
+    if (cursor >= last) return true;
+    if (source[cursor] === '/') return cursor + 1 === last;
+    const attributeStart = cursor;
+    while (cursor < last && isAlpha(source.charCodeAt(cursor))) cursor++;
+    if (attributeStart === cursor) return false;
+    cursor = tagWhitespaceLimit(source, cursor, true);
+    if (cursor < last && source[cursor] !== '=') return false;
+    cursor = tagWhitespaceLimit(source, cursor + 1, false);
+
+    const quote = source[cursor];
+    if (quote === "'" || quote === '"') {
+      const quoteEnd = source.indexOf(quote, cursor + 1);
+      if (quoteEnd === -1) return false;
+      cursor = quoteEnd + 1;
+      if (cursor < last && source[cursor] !== '/' && tagWhitespaceLimit(source, cursor, true) === cursor) return false;
+    } else {
+      const valueStart = cursor;
+      while (cursor < last && source[cursor] !== ' ' && source[cursor] !== '\t' && source[cursor] !== '>') cursor++;
+      if (valueStart === cursor) return false;
+    }
+  }
+  return true;
+}
+
+function htmlBlockEnd(source, kind) {
+  switch (kind) {
+    case '?': return source.indexOf('?>') !== -1;
+    case '!--': return source.indexOf('-->') !== -1;
+    case '![CDATA[': return source.indexOf(']]>') !== -1;
+    default: return source.toLowerCase().indexOf('</' + kind + '>') !== -1;
+  }
+}
+
+function htmlBlockTag(source) {
+  const tag = source.trimStart();
+  if (tag[0] !== '<') return null;
+  if (tag.startsWith('<!--')) return '!--';
+  if (tag.startsWith('<![CDATA[')) return '![CDATA[';
+  if (tag[1] === '?') return '?';
+  const begin = tag[1] === '/' ? 2 : 1;
+  if (!isAlpha(tag.charCodeAt(begin))) return null;
+  return tag.slice(begin, htmlNameLimit(tag, begin + 1)).toLowerCase();
+}
+
+function isInlineHtml(source) {
+  if (source[0] === '!' || source[0] === '?') return true;
+  const closing = source[0] === '/';
+  const begin = closing ? 1 : 0;
+  if (!isAlpha(source.charCodeAt(begin))) return false;
+  let cursor = htmlNameLimit(source, begin + 1);
+  if (closing) return cursor === source.length;
+  if (cursor < source.length && source[cursor] !== '/' && !isSpace(source[cursor])) return false;
+  if (source.includes('\n')) return multilineInlineTag(source, cursor);
+
+  while (cursor < source.length && isSpace(source[cursor])) cursor++;
+  if (cursor === source.length) return true;
+  if (source[cursor] === '/') return cursor + 1 === source.length;
+  while (cursor < source.length) {
+    const attributeStart = cursor;
+    while (cursor < source.length && !isSpace(source[cursor]) && source[cursor] !== '=') {
+      const code = source.charCodeAt(cursor);
+      const punctuation = source[cursor] === '_' || source[cursor] === ':' || source[cursor] === '.' || source[cursor] === '-';
+      if (!isAlpha(code) && !isDigit(code) && !punctuation) return false;
+      cursor++;
+    }
+    if (cursor === attributeStart) return false;
+    if (cursor === source.length) return true;
+    if (source[cursor] !== '=') {
+      if (!isSpace(source[cursor])) return false;
+      do { cursor++; } while (cursor < source.length && isSpace(source[cursor]));
+      if (cursor === source.length) return true;
+      if (source[cursor] === '/') return cursor + 1 === source.length;
+      continue;
+    }
+
+    cursor = tagWhitespaceLimit(source, cursor + 1, false);
+    const quote = source[cursor];
+    if (quote === '"' || quote === "'") {
+      const quoteEnd = source.indexOf(quote, cursor + 1);
+      if (quoteEnd < 0) return false;
+      cursor = quoteEnd + 1;
+    } else {
+      const valueStart = cursor;
+      for (; cursor < source.length && !isSpace(source[cursor]); cursor++) {
+        if (source[cursor] === '<' || source[cursor] === '>' || source[cursor] === '`') return false;
+      }
+      if (cursor === valueStart) return false;
+    }
+    const valueEnd = cursor;
+    while (cursor < source.length && isSpace(source[cursor])) cursor++;
+    if (cursor < source.length) {
+      if (source[cursor] === '/') return cursor + 1 === source.length;
+      if (cursor === valueEnd) return false;
+    }
+  }
+  return true;
+}
+
+function multilineInlineTag(source, nameEnd) {
+  let quoteParity = 0;
+  for (const character of source) {
+    if (character === '"' || character === "'") quoteParity ^= 1;
+  }
+  if (quoteParity || (source.slice(0, nameEnd).toLowerCase() === 'a' && source.includes('href='))) return true;
+  const firstNewline = source.indexOf('\n', nameEnd);
+  if (!source.slice(nameEnd, firstNewline).trim()) return true;
+  const rows = source.split('\n');
+  for (let row = 1; row < rows.length; row++) {
+    const attribute = rows[row].trim();
+    if (attribute && attribute !== '/' && !attribute.startsWith('_') && !attribute.includes('=')) return false;
+  }
+  return !source.includes('#') && !source.includes('*');
+}
+
+function isAutolink(source) {
+  const colon = angleSchemeColon(source);
+  if (colon < 0) return angleEmailAddress(source);
+  for (let cursor = colon + 1; cursor < source.length; cursor++) {
+    if (source[cursor] === '<' || source[cursor] === '>' || isSpace(source[cursor])) return false;
+  }
+  return true;
+}
+
+function angleSchemeColon(source) {
+  if (!isAlpha(source.charCodeAt(0))) return -1;
+  let cursor = 1;
+  while (cursor < source.length && cursor < 33) {
+    const character = source[cursor];
+    if (character === ':') return cursor >= 2 ? cursor : -1;
+    const code = source.charCodeAt(cursor);
+    if (!isAlpha(code) && !isDigit(code) && character !== '.' && character !== '-' && character !== '+') break;
+    cursor++;
+  }
+  return -1;
+}
+
+function angleEmailAddress(source) {
+  const at = source.lastIndexOf('@');
+  if (at < 1 || at + 1 === source.length) return false;
+  let cursor = 0;
+  for (; cursor < at; cursor++) {
+    const code = source.charCodeAt(cursor);
+    if (!(isAlpha(code) || isDigit(code) || EMAIL_LOCAL[code])) return false;
+  }
+  let lastDot = -1;
+  for (cursor = at + 1; cursor < source.length; cursor++) {
+    const code = source.charCodeAt(cursor);
+    if (code === 46) {
+      if (cursor === at + 1 || cursor === source.length - 1) return false;
+      lastDot = cursor;
+    } else if (!(code === 45 || isDigit(code) || isAlpha(code))) return false;
+  }
+  if (lastDot < 0 || source.length - lastDot < 3) return false;
+  for (cursor = lastDot + 1; cursor < source.length; cursor++) {
+    if (!isAlpha(source.charCodeAt(cursor))) return false;
+  }
+  return true;
+}
+
+function isTableDelimiter(source) {
+  const fields = splitTableFields(source);
+  return fields.length > 0 && fields.every(tableSeparatorValid);
+}
+
+function tableSeparatorValid(field) {
+  let begin = 0;
+  let limit = field.length;
+  while (field[begin] === ' ') begin++;
+  while (limit > begin && field[limit - 1] === ' ') limit--;
+  let cursor = field[begin] === ':' ? begin + 1 : begin;
+  const dashStart = cursor;
+  while (field[cursor] === '-') cursor++;
+  if (cursor === dashStart) return false;
+  if (field[cursor] === ':') cursor++;
+  return cursor === limit;
+}
+
+function renderTable(rows, start, references) {
+  if (!rows[start].includes('|') || !rows[start + 1].includes('|')) return null;
+  const headings = splitTableFields(rows[start]);
+  const separators = splitTableFields(rows[start + 1]);
+  if (headings.length === 0 || headings.length !== separators.length) return null;
+
+  let row = start + 2;
+  if (references[COLLECT_REFS]) {
+    while (row < rows.length && tableRowContinues(rows, row)) row++;
+    return { html: '', next: row };
+  }
+
+  const alignments = separators.map(tableAlignmentAttribute);
+  const output = ['<table>\n<thead>\n'];
+  emitTableRow(output, headings, alignments, 'th', references);
+  output.push('</thead>\n');
+  let bodyRows = 0;
+  while (row < rows.length && tableRowContinues(rows, row)) {
+    if (bodyRows === 0) output.push('<tbody>');
+    emitTableRow(output, splitTableFields(rows[row]), alignments, 'td', references);
+    row++;
+    bodyRows++;
+  }
+  if (bodyRows > 0) output.push('</tbody>');
+  output.push('</table>\n');
+  return { html: output.join(''), next: row };
+}
+
+function tableAlignmentAttribute(source) {
+  const marker = source.trim();
+  const hasLeftColon = marker[0] === ':';
+  const hasRightColon = marker[marker.length - 1] === ':';
+  if (hasLeftColon && hasRightColon) return ' align="center"';
+  if (hasLeftColon) return ' align="left"';
+  return hasRightColon ? ' align="right"' : '';
+}
+
+function emitTableRow(output, fields, alignments, element, references) {
+  output.push('<tr>\n');
+  let column = 0;
+  while (column < alignments.length) {
+    const source = trimAscii(fields[column] ?? '').replaceAll('\\|', '|');
+    const body = renderInline(source, references);
+    output.push('<' + element + alignments[column] + '>' + body + '</' + element + '>\n');
+    column++;
+  }
+  output.push('</tr>\n');
+}
+
+function tableRowContinues(rows, row) {
+  const source = rows[row];
+  if (isBlank(source)) return source.indexOf('\t') !== -1;
+  if (!startsBlock(rows, row) || source.indexOf('|') !== -1) return true;
+  return row + 1 < rows.length && setextLevel(rows[row + 1]);
+}
+
+function splitTableFields(source) {
+  const fields = [];
+  let fieldStart = 0;
+  let backslashes = 0;
+  for (let cursor = 0; cursor < source.length; cursor++) {
+    const code = source.charCodeAt(cursor);
+    if (code === 92) {
+      backslashes++;
+      continue;
+    }
+    if (code === 124 && backslashes % 2 === 0) {
+      fields.push(source.slice(fieldStart, cursor));
+      fieldStart = cursor + 1;
+    }
+    backslashes = 0;
+  }
+  fields.push(source.slice(fieldStart));
+  const first = fields.length > 1 && fields[0].trim().length === 0 ? 1 : 0;
+  let limit = fields.length;
+  if (limit - first > 1 && fields[limit - 1].trim().length === 0) limit--;
+  return fields.slice(first, limit);
+}
+
+function findStrikeClose(source, start, references) {
+  let nesting = 1;
+  let cursor = start + 2;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\\') {
+      cursor += Math.min(2, source.length - cursor);
+      continue;
+    }
+    if (character === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+      cursor = (closing < 0 ? cursor : closing) + width;
+      continue;
+    }
+    if (character === '<') {
+      const limit = tagClosingAngle(source, cursor);
+      if (limit >= 0) {
+        cursor = limit + 1;
+        continue;
+      }
+    }
+    if (character === '[' || (character === '!' && source[cursor + 1] === '[')) {
+      const link = readInlineLink(source, cursor, references, true);
+      if (link) {
+        cursor = link.end;
+        continue;
+      }
+    }
+    if (character !== '~') {
+      cursor++;
+      continue;
+    }
+    const width = markerRun(source, cursor, '~');
+    if (width === 2) {
+      if (cursor > 0 && !isSpace(source[cursor - 1])) {
+        if (--nesting === 0) return cursor;
+      } else if (!isSpace(source[cursor + 2])) nesting++;
+    }
+    cursor += width;
+  }
+  return -1;
+}
+
+function renderInline(source, references, suppressBareUrls = false) {
+  if (references[COLLECT_REFS]) return '';
+  const fragments = [];
+  const codePositions = codeSpanPositions(source);
+  const lastAt = source.lastIndexOf('@');
+  let cursor = 0;
+  let literalThrough = -1;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    const code = source.charCodeAt(cursor);
+    if (!INLINE_SPECIAL[code]) {
+      const allowBare = !suppressBareUrls && !references[IN_RAW_LINK];
+      const possibleUrl = (code | 32) === 104 || code === 119 || (cursor < lastAt && isAlpha(code));
+      if (allowBare && possibleUrl && (cursor === 0 || !isWord(source[cursor - 1]))) {
+        const link = bareLinkAt(source, cursor, cursor < lastAt);
+        if (link) {
+          fragments.push('<a href="' + cleanUrl(link.href) + '">' + escapeHtml(link.label) + '</a>');
+          cursor = link.end;
           continue;
         }
       }
-      let end = i + 1;
-      while (end < text.length) {
-        const next = text.charCodeAt(end);
-        if (INLINE_SPECIAL[next]) break;
-        if (bare && (end < lastEmailAt || (next | 32) === 104 || next === 119) && isAlpha(next) && !isWord(text[end - 1])) break;
-        end++;
+      const begin = cursor++;
+      while (cursor < source.length) {
+        const nextCode = source.charCodeAt(cursor);
+        if (INLINE_SPECIAL[nextCode]) break;
+        const couldStartLink = cursor < lastAt || (nextCode | 32) === 104 || nextCode === 119;
+        if (allowBare && couldStartLink && isAlpha(nextCode) && !isWord(source[cursor - 1])) break;
+        cursor++;
       }
-      out.push(text.slice(i, end));
-      i = end;
+      fragments.push(source.slice(begin, cursor));
       continue;
     }
-    if (c === '\\' && i + 1 < text.length) {
-      if (text[i + 1] === '\n') {
-        out.push('<br>');
-        i += 2;
-        while (text[i] === ' ' || text[i] === '\t') i++;
+    if (character === '\\' && cursor + 1 < source.length) {
+      const escaped = source[cursor + 1];
+      if (escaped === '\n') {
+        fragments.push('<br>');
+        cursor += 2;
+        cursor += leadingSpaces(source.slice(cursor));
         continue;
       }
-      if (PUNCT.includes(text[i + 1])) { out.push(escapeHtml(text[i + 1])); i += 2; continue; }
-    }
-    if (c === '\n') {
-      let spaces = 0;
-      for (let p = i - 1; p >= 0 && text[p] === ' '; p--) spaces++;
-      if (spaces >= 2) {
-        let remaining = spaces;
-        while (remaining > 0 && out.length) {
-          const tail = out.pop();
-          if (tail.length <= remaining) remaining -= tail.length;
-          else { out.push(tail.slice(0, -remaining)); remaining = 0; }
-        }
-      }
-      out.push(spaces >= 2 ? '<br>' : '\n');
-      i++;
-      if (spaces >= 2) while (text[i] === ' ' || text[i] === '\t') i++;
-      continue;
-    }
-    if (c === '`') {
-      let n = 1; while (text[i + n] === '`') n++;
-      const mark = '`'.repeat(n);
-      const end = codeMask?.[i] > 0 ? codeMask[i] - 1 : findCodeClosing(text, i + n, mark);
-      if (end >= 0) {
-        let code = replaceNewlines(text.slice(i + n, end), ' ');
-        if (code.length > 1 && code[0] === ' ' && code[code.length - 1] === ' ' && code.trim()) code = code.slice(1, -1);
-        out.push(`<code>${escapeHtml(code, true)}</code>`); i = end + n; continue;
-      }
-      if (n > 1) { out.push(escapeHtml('`'.repeat(n))); i += n; continue; }
-    }
-    if (c === '&') {
-      const entityEnd = entityAt(text, i);
-      if (entityEnd > i) {
-        const source = text.slice(i, entityEnd);
-        if (source[1] === '#') {
-          const decoded = decodeEntity(source);
-          out.push(decoded === null ? escapeHtml(source, true) : escapeHtml(decoded));
-        }
-        else out.push(source);
-        i = entityEnd; continue;
-      }
-    }
-    if (c === '<') {
-      if (text.startsWith('<![CDATA[', i)) {
-        const cdataEnd = text.indexOf(']]>', i + 9);
-        if (cdataEnd >= 0) { out.push(text.slice(i, cdataEnd + 3)); i = cdataEnd + 3; continue; }
-      }
-      const close = inlineTagEnd(text, i);
-      if (close >= 0) {
-        const inside = text.slice(i + 1, close);
-        if (isAutolink(inside)) {
-          const href = inside.includes('@') && !inside.includes(':') ? `mailto:${inside}` : inside;
-          out.push(`<a href="${cleanUrl(href)}">${escapeHtml(inside)}</a>`); i = close + 1; continue;
-        }
-        if (isInlineHtml(inside)) {
-          const tag = inside.toLowerCase();
-          if (tag === '/a') refs[IN_RAW_LINK] = false;
-          else if (tag[0] === 'a' && (tag.length === 1 || isSpace(tag[1]))) refs[IN_RAW_LINK] = true;
-          let end = close + 1;
-          if (inside[0] === '/' && text[end] === '<') {
-            const nextEnd = inlineTagEnd(text, end);
-            if (nextEnd >= 0 && !isInlineHtml(text.slice(end + 1, nextEnd))) end = nextEnd + 1;
-          }
-          out.push(text.slice(i, end)); i = end; continue;
-        }
-      }
-    }
-    if (c === '[' || (c === '!' && text[i + 1] === '[')) {
-      const parsed = parseLink(text, i, refs);
-      if (parsed) { out.push(parsed.html); i = parsed.end; continue; }
-      const open = i + (c === '!' ? 1 : 0);
-      const close = findLabelClose(text, open);
-      if (close < text.length && hasTrailingTextAfterMixedCode(text.slice(open + 1, close))) literalLabelEnd = close;
-      if (c === '[') {
-        const shortcut = parseShortcutLink(text, i, refs);
-        if (shortcut) { out.push(shortcut.html); i = shortcut.end; continue; }
-      }
-    }
-    if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
-      const end = findStrikeClose(text, i, refs);
-      if (end > i + 2 && !isSpace(text[end - 1])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs, suppressBareUrls)}</del>`); i = end + 2; continue; }
-    }
-    if (c === '~' && text[i + 1] !== '~' && text[i - 1] !== '~' && !isSpace(text[i + 1])) {
-      const end = text.indexOf('~', i + 1);
-      if (end > i + 1 && text[end - 1] !== '~' && text[end + 1] !== '~' && !isSpace(text[end - 1])) {
-        out.push(`<del>${renderInline(text.slice(i + 1, end), refs, suppressBareUrls)}</del>`);
-        i = end + 1;
+      if (PUNCT.includes(escaped)) {
+        fragments.push(escapeHtml(escaped));
+        cursor += 2;
         continue;
       }
     }
-    if ((c === '*' || c === '_') && !codeMask?.[i] && i > literalLabelEnd) {
-      let n = 1; while (text[i + n] === c) n++;
-      const canOpen = delimiterCanOpen(text, i, n, c);
-      const match = canOpen ? findEmphasisSpan(text, i, n, c, refs) : null;
+    if (character === '\n') {
+      let preceding = cursor;
+      while (preceding > 0 && source[preceding - 1] === ' ') preceding--;
+      const spaces = cursor - preceding;
+      if (spaces >= 2) removeOutputSuffix(fragments, spaces);
+      fragments.push(spaces < 2 ? '\n' : '<br>');
+      cursor++;
+      if (spaces >= 2) cursor += leadingSpaces(source.slice(cursor));
+      continue;
+    }
+    if (character === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = codePositions?.[cursor] > 0
+        ? codePositions[cursor] - 1 : closingBackticks(source, cursor + width, '`'.repeat(width));
+      if (closing >= 0) {
+        let body = replaceNewlines(source.slice(cursor + width, closing), ' ');
+        if (body.length > 1 && body.startsWith(' ') && body.endsWith(' ') && body.trim()) body = body.slice(1, -1);
+        fragments.push('<code>' + escapeHtml(body, true) + '</code>');
+        cursor = closing + width;
+        continue;
+      }
+      if (width > 1) {
+        fragments.push(escapeHtml('`'.repeat(width)));
+        cursor += width;
+        continue;
+      }
+    }
+    if (character === '&') {
+      const limit = entityAt(source, cursor);
+      if (limit > cursor) {
+        const entity = source.slice(cursor, limit);
+        if (entity[1] !== '#') fragments.push(entity);
+        else {
+          const value = entityValue(entity);
+          fragments.push(value === null ? escapeHtml(entity, true) : escapeHtml(value));
+        }
+        cursor = limit;
+        continue;
+      }
+    }
+    if (character === '<') {
+      const angle = renderAngleConstruct(source, cursor, references);
+      if (angle) {
+        fragments.push(angle.html);
+        cursor = angle.end;
+        continue;
+      }
+    }
+    if (character === '[' || (character === '!' && source[cursor + 1] === '[')) {
+      const link = readInlineLink(source, cursor, references);
+      if (link) {
+        fragments.push(link.html);
+        cursor = link.end;
+        continue;
+      }
+      const opening = cursor + (character === '!' ? 1 : 0);
+      const closing = labelClosingBracket(source, opening);
+      if (closing < source.length && mixedCodeLabelTail(source.slice(opening + 1, closing))) literalThrough = closing;
+      if (character === '[') {
+        const shortcut = shortcutReference(source, cursor, references);
+        if (shortcut) {
+          fragments.push(shortcut.html);
+          cursor = shortcut.end;
+          continue;
+        }
+      }
+    }
+    if (character === '~') {
+      const strike = strikeExtent(source, cursor, references);
+      if (strike) {
+        const body = renderInline(source.slice(cursor + strike.width, strike.closing), references, suppressBareUrls);
+        fragments.push('<del>' + body + '</del>');
+        cursor = strike.closing + strike.width;
+        continue;
+      }
+    }
+    if ((character === '_' || character === '*') && !codePositions?.[cursor] && cursor > literalThrough) {
+      const width = markerRun(source, cursor, character);
+      const canOpen = flankingSides(source, cursor, width, character).open;
+      const match = canOpen ? emphasisExtent(source, cursor, width, character, references) : null;
       if (match) {
-        const prefix = match.prefix || 0;
-        const used = Math.min(n - prefix, match.count) % 2 ? 1 : 2;
-        const end = match.at + match.count;
-        const tag = used === 1 ? 'em' : 'strong';
-        out.push(c.repeat(prefix), `<${tag}>${renderInline(text.slice(i + prefix + used, end - used), refs, suppressBareUrls)}</${tag}>`);
-        i = end;
+        const unused = match.prefix || 0;
+        const paired = Math.min(width - unused, match.count) % 2 ? 1 : 2;
+        const limit = match.at + match.count;
+        const element = paired === 1 ? 'em' : 'strong';
+        const body = renderInline(source.slice(cursor + unused + paired, limit - paired), references, suppressBareUrls);
+        fragments.push(character.repeat(unused), '<' + element + '>' + body + '</' + element + '>');
+        cursor = limit;
         continue;
       }
-      if (!canOpen && n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
+      if (!canOpen && width > 1) {
+        fragments.push(escapeHtml(character.repeat(width)));
+        cursor += width;
+        continue;
+      }
     }
-    out.push(ESC[c] || c);
-    i++;
+    fragments.push(ESC[character] || character);
+    cursor++;
   }
-  return out.join('');
+  return fragments.join('');
 }
 
-function inlineCodeMask(text) {
-  let mask = null;
-  let i = text.indexOf('`');
-  while (i >= 0) {
-    let slashes = 0;
-    for (let p = i - 1; p >= 0 && text[p] === '\\'; p--) slashes++;
-    if (slashes & 1) { i = text.indexOf('`', i + 1); continue; }
-    const count = delimiterRunLength(text, i, '`');
-    const close = findCodeClosing(text, i + count, '`'.repeat(count));
-    if (close < 0) { i = text.indexOf('`', i + count); continue; }
-    if (!mask) mask = new Int32Array(text.length);
-    mask.fill(-1, i, close + count);
-    mask[i] = close + 1;
-    i = text.indexOf('`', close + count);
+function removeOutputSuffix(fragments, count) {
+  let remaining = count;
+  while (remaining > 0 && fragments.length > 0) {
+    const tail = fragments.pop();
+    if (tail.length > remaining) {
+      fragments.push(tail.slice(0, tail.length - remaining));
+      break;
+    }
+    remaining -= tail.length;
   }
-  return mask;
 }
 
-function parseShortcutLink(text, start, refs) {
-  const close = findLabelClose(text, start);
-  if (close >= text.length || (start > 0 && text[start - 1] === ']') || text[close + 1] === '[') return null;
-  const label = text.slice(start + 1, close);
-  const ref = refs[normalizeLabel(label)];
-  if (!ref) return null;
-  return { html: `<a href="${cleanUrl(ref.url)}"${ref.title ? ` title="${escapeHtml(ref.title)}"` : ''}>${renderInline(label, refs, true)}</a>`, end: close + 1 };
+function strikeExtent(source, start, references) {
+  if (source[start - 1] === '~') return null;
+  if (source[start + 1] === '~') {
+    if (source[start + 2] === '~' || isSpace(source[start + 2])) return null;
+    const closing = findStrikeClose(source, start, references);
+    return closing > start + 2 && !isSpace(source[closing - 1]) ? { closing, width: 2 } : null;
+  }
+  if (isSpace(source[start + 1])) return null;
+  const closing = source.indexOf('~', start + 1);
+  if (closing <= start + 1 || source[closing - 1] === '~' || source[closing + 1] === '~' || isSpace(source[closing - 1])) return null;
+  return { closing, width: 1 };
 }
 
-function entityAt(text, i) {
-  let j = i + 1;
-  if (text[j] === '#') {
-    j++;
-    const digitStart = j;
-    if (text[j] === 'x' || text[j] === 'X') { j++; const hexStart = j; while (isHex(text.charCodeAt(j))) j++; if (j === hexStart) return i; }
-    else { while (isDigit(text.charCodeAt(j))) j++; if (j === digitStart) return i; }
+function renderAngleConstruct(source, start, references) {
+  if (source.startsWith('<![CDATA[', start)) {
+    const closing = source.indexOf(']]>', start + 9);
+    if (closing >= 0) return { end: closing + 3, html: source.slice(start, closing + 3) };
+  }
+  const closing = tagClosingAngle(source, start);
+  if (closing < 0) return null;
+  const contents = source.slice(start + 1, closing);
+  if (isAutolink(contents)) {
+    const target = contents.includes('@') && !contents.includes(':') ? 'mailto:' + contents : contents;
+    return { end: closing + 1, html: '<a href="' + cleanUrl(target) + '">' + escapeHtml(contents) + '</a>' };
+  }
+  if (!isInlineHtml(contents)) return null;
+  const tag = contents.toLowerCase();
+  if (tag === '/a') references[IN_RAW_LINK] = false;
+  else if (tag[0] === 'a' && (tag.length === 1 || isSpace(tag[1]))) references[IN_RAW_LINK] = true;
+  let limit = closing + 1;
+  if (contents[0] === '/' && source[limit] === '<') {
+    const nextClosing = tagClosingAngle(source, limit);
+    if (nextClosing >= 0 && !isInlineHtml(source.slice(limit + 1, nextClosing))) limit = nextClosing + 1;
+  }
+  return { end: limit, html: source.slice(start, limit) };
+}
+
+function codeSpanPositions(source) {
+  let positions = null;
+  let cursor = source.indexOf('`');
+  while (cursor !== -1) {
+    let preceding = cursor;
+    let slashCount = 0;
+    while (preceding > 0 && source[--preceding] === '\\') slashCount++;
+    if (slashCount % 2) {
+      cursor = source.indexOf('`', cursor + 1);
+      continue;
+    }
+    const width = markerRun(source, cursor, '`');
+    const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+    if (closing === -1) {
+      cursor = source.indexOf('`', cursor + width);
+      continue;
+    }
+    positions ??= new Int32Array(source.length);
+    positions.fill(-1, cursor, closing + width);
+    positions[cursor] = closing + 1;
+    cursor = source.indexOf('`', closing + width);
+  }
+  return positions;
+}
+
+function shortcutReference(source, start, references) {
+  const limit = labelClosingBracket(source, start);
+  if (limit >= source.length || (start > 0 && source[start - 1] === ']') || source[limit + 1] === '[') return null;
+  const label = source.slice(start + 1, limit);
+  const saved = references[normalizeLabel(label)];
+  if (!saved) return null;
+  const title = saved.title ? ' title="' + escapeHtml(saved.title) + '"' : '';
+  const body = renderInline(label, references, true);
+  return { end: limit + 1, html: '<a href="' + cleanUrl(saved.url) + '"' + title + '>' + body + '</a>' };
+}
+
+function entityAt(source, start) {
+  let cursor = start + 1;
+  if (source[cursor] !== '#') {
+    if (!isAlpha(source.charCodeAt(cursor))) return start;
+    do { cursor++; } while (isAlpha(source.charCodeAt(cursor)) || isDigit(source.charCodeAt(cursor)));
   } else {
-    if (!isAlpha(text.charCodeAt(j))) return i;
-    while (isAlpha(text.charCodeAt(j)) || isDigit(text.charCodeAt(j))) j++;
+    cursor++;
+    const hexadecimal = source[cursor] === 'x' || source[cursor] === 'X';
+    if (hexadecimal) cursor++;
+    const digits = cursor;
+    while (hexadecimal ? isHex(source.charCodeAt(cursor)) : isDigit(source.charCodeAt(cursor))) cursor++;
+    if (cursor === digits) return start;
   }
-  return text[j] === ';' && j > i + 1 ? j + 1 : i;
+  return source[cursor] === ';' && cursor > start + 1 ? cursor + 1 : start;
 }
 
-const ENTITY = {
-  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0', copy: '\u00a9', reg: '\u00ae', trade: '\u2122',
-  mdash: '\u2014', ndash: '\u2013', hellip: '\u2026', lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c', rdquo: '\u201d',
-  laquo: '\u00ab', raquo: '\u00bb', bull: '\u2022', middot: '\u00b7', euro: '\u20ac', pound: '\u00a3', yen: '\u00a5',
-  cent: '\u00a2', sect: '\u00a7', para: '\u00b6', deg: '\u00b0', plusmn: '\u00b1', times: '\u00d7', divide: '\u00f7',
-  frac12: '\u00bd', frac14: '\u00bc', frac34: '\u00be', micro: '\u00b5', acute: '\u00b4', uml: '\u00a8', shy: '\u00ad',
-  OElig: '\u0152', oelig: '\u0153', Scaron: '\u0160', scaron: '\u0161', Yuml: '\u0178', fnof: '\u0192', circ: '\u02c6',
-  tilde: '\u02dc', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009', zwnj: '\u200c', zwj: '\u200d', lrm: '\u200e', rlm: '\u200f',
-  Alpha: '\u0391', Beta: '\u0392', Gamma: '\u0393', Delta: '\u0394', Pi: '\u03a0', Sigma: '\u03a3', Omega: '\u03a9',
-  alpha: '\u03b1', beta: '\u03b2', gamma: '\u03b3', delta: '\u03b4', pi: '\u03c0', sigma: '\u03c3', omega: '\u03c9',
-  forall: '\u2200', part: '\u2202', exist: '\u2203', empty: '\u2205', nabla: '\u2207', isin: '\u2208', notin: '\u2209',
-  ni: '\u220b', prod: '\u220f', sum: '\u2211', minus: '\u2212', lowast: '\u2217', radic: '\u221a', prop: '\u221d',
-  infin: '\u221e', ang: '\u2220', and: '\u2227', or: '\u2228', cap: '\u2229', cup: '\u222a', int: '\u222b', there4: '\u2234',
-  sim: '\u223c', cong: '\u2245', asymp: '\u2248', ne: '\u2260', equiv: '\u2261', le: '\u2264', ge: '\u2265', sub: '\u2282',
-  sup: '\u2283', nsub: '\u2284', sube: '\u2286', supe: '\u2287', oplus: '\u2295', otimes: '\u2297', perp: '\u22a5',
-  lceil: '\u2308', rceil: '\u2309', lfloor: '\u230a', rfloor: '\u230b', lang: '\u2329', rang: '\u232a', loz: '\u25ca',
-  spades: '\u2660', clubs: '\u2663', hearts: '\u2665', diams: '\u2666', iexcl: '\u00a1', iquest: '\u00bf',
+const NAMED_ENTITIES = {
+  lt: '<', gt: '>', amp: '&', apos: "'", quot: '"',
+  nbsp: '\u00a0', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009',
+  shy: '\u00ad', zwnj: '\u200c', zwj: '\u200d', lrm: '\u200e', rlm: '\u200f',
+  lsquo: '\u2018', ldquo: '\u201c', rsquo: '\u2019', rdquo: '\u201d',
+  laquo: '\u00ab', raquo: '\u00bb', iexcl: '\u00a1', iquest: '\u00bf',
+  ndash: '\u2013', mdash: '\u2014', hellip: '\u2026', bull: '\u2022', middot: '\u00b7',
+  copy: '\u00a9', reg: '\u00ae', trade: '\u2122', sect: '\u00a7', para: '\u00b6',
+  cent: '\u00a2', pound: '\u00a3', yen: '\u00a5', euro: '\u20ac',
+  uml: '\u00a8', acute: '\u00b4', circ: '\u02c6', tilde: '\u02dc',
+  OElig: '\u0152', oelig: '\u0153', Scaron: '\u0160', scaron: '\u0161', Yuml: '\u0178', fnof: '\u0192',
+  Alpha: '\u0391', alpha: '\u03b1', Beta: '\u0392', beta: '\u03b2',
+  Gamma: '\u0393', gamma: '\u03b3', Delta: '\u0394', delta: '\u03b4',
+  Pi: '\u03a0', pi: '\u03c0', Sigma: '\u03a3', sigma: '\u03c3', Omega: '\u03a9', omega: '\u03c9',
+  deg: '\u00b0', plusmn: '\u00b1', micro: '\u00b5', times: '\u00d7', divide: '\u00f7',
+  frac14: '\u00bc', frac12: '\u00bd', frac34: '\u00be',
+  forall: '\u2200', exist: '\u2203', empty: '\u2205', part: '\u2202', nabla: '\u2207',
+  isin: '\u2208', ni: '\u220b', notin: '\u2209', prod: '\u220f', sum: '\u2211',
+  minus: '\u2212', lowast: '\u2217', radic: '\u221a', prop: '\u221d', infin: '\u221e',
+  ang: '\u2220', and: '\u2227', or: '\u2228', cap: '\u2229', cup: '\u222a', int: '\u222b',
+  there4: '\u2234', sim: '\u223c', cong: '\u2245', asymp: '\u2248',
+  ne: '\u2260', equiv: '\u2261', le: '\u2264', ge: '\u2265',
+  sub: '\u2282', sube: '\u2286', sup: '\u2283', supe: '\u2287', nsub: '\u2284',
+  oplus: '\u2295', otimes: '\u2297', perp: '\u22a5',
+  lceil: '\u2308', lfloor: '\u230a', rceil: '\u2309', rfloor: '\u230b', lang: '\u2329', rang: '\u232a',
+  loz: '\u25ca', spades: '\u2660', hearts: '\u2665', clubs: '\u2663', diams: '\u2666'
 };
 
-function decodeEntity(entity) {
-  const body = entity.slice(1, -1);
-  if (body[0] === '#') {
-    const hex = body[1] === 'x' || body[1] === 'X';
-    const value = Number.parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10);
-    if (!Number.isFinite(value)) return null;
-    if (value > 0x10ffff) return null;
-    if (value === 0 || (value >= 0xd800 && value <= 0xdfff)) return '\ufffd';
-    return String.fromCodePoint(value);
-  }
-  return Object.prototype.hasOwnProperty.call(ENTITY, body) ? ENTITY[body] : null;
+function entityValue(source) {
+  const name = source.slice(1, -1);
+  if (name[0] !== '#') return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : null;
+  const hexadecimal = name[1] === 'X' || name[1] === 'x';
+  const code = Number.parseInt(name.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+  if (!Number.isFinite(code) || code > 0x10ffff) return null;
+  if (code === 0 || (code >= 0xd800 && code <= 0xdfff)) return '\ufffd';
+  return String.fromCodePoint(code);
 }
 
-function findCodeClosing(text, from, marker) {
-  const size = marker.length;
-  let p = from;
-  while ((p = text.indexOf('`', p)) >= 0) {
-    let end = p;
-    while (text[end] === '`') end++;
-    if (end - p === size) return p;
-    p = end;
+function markerRun(source, start, marker) {
+  let limit = start;
+  while (source[limit] === marker) limit++;
+  return limit - start;
+}
+
+function closingBackticks(source, from, marker) {
+  let cursor = source.indexOf('`', from);
+  while (cursor !== -1) {
+    const width = markerRun(source, cursor, '`');
+    if (width === marker.length) return cursor;
+    cursor = source.indexOf('`', cursor + width);
   }
   return -1;
 }
 
-function delimiterRunLength(text, at, marker) {
-  let n = 0;
-  while (text[at + n] === marker) n++;
-  return n;
-}
-
-function delimiterInfo(text, at, count, marker) {
-  const before = at > 0 ? text.codePointAt(at - (text.charCodeAt(at - 1) >= 0xdc00 && text.charCodeAt(at - 1) <= 0xdfff ? 2 : 1)) : 32;
-  const afterAt = at + count;
-  const after = afterAt < text.length ? text.codePointAt(afterAt) : 32;
-  const beforeSpace = isUnicodeSpace(before), afterSpace = isUnicodeSpace(after);
-  const beforePunct = isUnicodePunctuation(before), afterPunct = isUnicodePunctuation(after);
-  const left = !afterSpace && (!afterPunct || beforeSpace || beforePunct);
-  const right = !beforeSpace && (!beforePunct || afterSpace || afterPunct);
+function flankingSides(source, start, width, marker) {
+  let before = 32;
+  if (start > 0) {
+    const previousUnit = source.charCodeAt(start - 1);
+    before = source.codePointAt(start - (previousUnit >= 0xdc00 && previousUnit <= 0xdfff ? 2 : 1));
+  }
+  const after = start + width < source.length ? source.codePointAt(start + width) : 32;
+  const beforeSpace = unicodeWhitespace(before);
+  const afterSpace = unicodeWhitespace(after);
+  const beforePunctuation = unicodePunctuation(before);
+  const afterPunctuation = unicodePunctuation(after);
+  const left = !afterSpace && (!afterPunctuation || beforeSpace || beforePunctuation);
+  const right = !beforeSpace && (!beforePunctuation || afterSpace || afterPunctuation);
   if (marker === '*') return { open: left, close: right };
-  return { open: left && (!right || beforePunct), close: right && (!left || afterPunct) };
+  return { open: left && (!right || beforePunctuation), close: right && (!left || afterPunctuation) };
 }
 
-function delimiterCanOpen(text, at, count, marker) { return delimiterInfo(text, at, count, marker).open; }
-
-function findEmphasisSpan(text, start, opening, marker, refs) {
-  const left = delimiterInfo(text, start, opening, marker);
-  let balance = opening;
-  let ambiguous = 0;
-  for (let p = start + opening; p < text.length;) {
-    const ch = text[p];
-    if (ch === '\\') { p += 2; continue; }
-    if (ch === '`') {
-      const run = delimiterRunLength(text, p, '`');
-      const close = findCodeClosing(text, p + run, '`'.repeat(run));
-      p = close < 0 ? p + run : close + run;
+function emphasisExtent(source, start, openingWidth, marker, references) {
+  const opening = flankingSides(source, start, openingWidth, marker);
+  let needed = openingWidth;
+  let deferred = 0;
+  let cursor = start + openingWidth;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\\') {
+      cursor += 2;
       continue;
     }
-    if (ch === '<') {
-      const end = inlineTagEnd(text, p);
-      if (end >= 0) { p = end + 1; continue; }
+    if (character === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+      cursor = (closing < 0 ? cursor : closing) + width;
+      continue;
     }
-    if (ch === '[' || (ch === '!' && text[p + 1] === '[')) {
-      const link = parseLink(text, p, refs, true);
-      if (link) { p = link.end; continue; }
+    if (character === '<') {
+      const closing = tagClosingAngle(source, cursor);
+      if (closing >= 0) {
+        cursor = closing + 1;
+        continue;
+      }
     }
-    if (ch !== marker) { p++; continue; }
-    const count = delimiterRunLength(text, p, marker);
-    const info = delimiterInfo(text, p, count, marker);
-    if (info.close) {
-      if ((left.close || info.open) && (opening + count) % 3 === 0 && (opening % 3 !== 0 || count % 3 !== 0)) ambiguous += count;
+    if (character === '[' || (character === '!' && source[cursor + 1] === '[')) {
+      const link = readInlineLink(source, cursor, references, true);
+      if (link) {
+        cursor = link.end;
+        continue;
+      }
+    }
+    if (character !== marker) {
+      cursor++;
+      continue;
+    }
+    const width = markerRun(source, cursor, marker);
+    const sides = flankingSides(source, cursor, width, marker);
+    if (sides.close) {
+      if (ambiguousDelimiterPair(opening.close, sides.open, openingWidth, width)) deferred += width;
       else {
-        balance -= count;
-        if (balance <= 0) return { at: p, count: Math.min(count, count + balance + ambiguous) };
+        needed -= width;
+        if (needed <= 0) return { at: cursor, count: Math.min(width, width + needed + deferred) };
       }
-    } else if (info.open) balance += count;
-    p += count;
+    } else if (sides.open) needed += width;
+    cursor += width;
   }
-  if (!ambiguous) {
-    const fallback = findDelimiterGroups(text, start + opening, marker, opening, refs);
-    if (fallback) {
-      let used = 0;
-      for (const match of fallback) used += match.count;
-      const last = fallback[fallback.length - 1];
-      return { at: last.at, count: last.count, prefix: opening - used };
-    }
-  }
-  return null;
+  if (deferred) return null;
+  const groups = collectDelimiterPairs(source, start + openingWidth, marker, openingWidth, true, true, references);
+  if (!groups) return null;
+  let consumed = 0;
+  for (const group of groups) consumed += group.count;
+  const last = groups[groups.length - 1];
+  return { at: last.at, count: last.count, prefix: openingWidth - consumed };
 }
 
-function findDelimiterGroups(text, from, marker, openerCount, refs) {
-  return scanDelimiters(text, from, marker, openerCount, true, true, refs);
+function ambiguousDelimiterPair(openingCloses, closingOpens, openingWidth, closingWidth) {
+  return (openingCloses || closingOpens) && (openingWidth + closingWidth) % 3 === 0
+    && (openingWidth % 3 !== 0 || closingWidth % 3 !== 0);
 }
 
-function scanDelimiters(text, from, marker, openerCount, skipOther, collect, refs = Object.create(null)) {
-  let p = from;
-  const nested = [];
-  const matches = [];
-  let remaining = openerCount;
-  while (p < text.length) {
-    if (text[p] === '\\') { p += Math.min(2, text.length - p); continue; }
-    if (text[p] === '`') {
-      let ticks = delimiterRunLength(text, p, '`');
-      const end = findCodeClosing(text, p + ticks, '`'.repeat(ticks));
-      if (end >= 0) { p = end + ticks; continue; }
-      p += ticks; continue;
-    }
-    if (text[p] === '<') {
-      const end = text.indexOf('>', p + 1);
-      if (end >= 0) { p = end + 1; continue; }
-    }
-    if (text[p] === '[' || (text[p] === '!' && text[p + 1] === '[')) {
-      const link = parseLink(text, p, refs, true);
-      if (link) { p = link.end; continue; }
-    }
-    if (skipOther && (text[p] === '*' || text[p] === '_') && text[p] !== marker) {
-      const other = text[p];
-      const count = delimiterRunLength(text, p, other);
-      if (delimiterCanOpen(text, p, count, other)) {
-        const otherMatches = scanDelimiters(text, p + count, other, count, false, false, refs);
-        const end = otherMatches ? otherMatches[0].at : -1;
-        if (end >= 0 && !hasClosingDelimiter(text, p + count, end, marker)) {
-          p = end + Math.min(count, delimiterRunLength(text, end, other));
-          continue;
-        }
-      }
-      p += count;
+function collectDelimiterPairs(source, from, marker, openingWidth, skipAlternate, collectAll, references = Object.create(null)) {
+  const stack = [];
+  const pairs = [];
+  let needed = openingWidth;
+  let cursor = from;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\\') {
+      cursor += Math.min(2, source.length - cursor);
       continue;
     }
-    if (text[p] !== marker) { p++; continue; }
-    const count = delimiterRunLength(text, p, marker);
-    const info = delimiterInfo(text, p, count, marker);
-    if (info.close) {
-      let canCloseOuter = true;
-      if (nested.length && count >= nested[nested.length - 1]) {
-        const nestedCount = nested.pop();
-        const nestedInfo = delimiterInfo(text, p, count, marker);
-        if (!nestedInfo.close) nested.push(nestedCount);
-        else { p += nestedCount; continue; }
+    if (character === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+      cursor = (closing < 0 ? cursor : closing) + width;
+      continue;
+    }
+    if (character === '<') {
+      const closing = source.indexOf('>', cursor + 1);
+      if (closing >= 0) {
+        cursor = closing + 1;
+        continue;
       }
-      if (canCloseOuter && count > 0) {
-        const openerInfo = delimiterInfo(text, from - openerCount, openerCount, marker);
-        if (!(openerInfo.close || info.open) || ((openerCount + count) % 3 !== 0 || (openerCount % 3 === 0 && count % 3 === 0))) {
-          const used = Math.min(remaining, count);
-          matches.push({ at: p, count: used });
-          remaining -= used;
-          if (!collect || remaining === 0) return matches;
-          p += count;
+    }
+    if (character === '[' || (character === '!' && source[cursor + 1] === '[')) {
+      const link = readInlineLink(source, cursor, references, true);
+      if (link) {
+        cursor = link.end;
+        continue;
+      }
+    }
+    if (skipAlternate && character !== marker && (character === '_' || character === '*')) {
+      const width = markerRun(source, cursor, character);
+      if (flankingSides(source, cursor, width, character).open) {
+        const other = collectDelimiterPairs(source, cursor + width, character, width, false, false, references);
+        const closing = other ? other[0].at : -1;
+        if (closing >= 0 && !containsClosingMarker(source, cursor + width, closing, marker)) {
+          cursor = closing + Math.min(width, markerRun(source, closing, character));
           continue;
         }
       }
+      cursor += width;
+      continue;
     }
-    if (info.open) nested.push(count);
-    p += count;
+    if (character !== marker) {
+      cursor++;
+      continue;
+    }
+    const width = markerRun(source, cursor, marker);
+    const sides = flankingSides(source, cursor, width, marker);
+    if (sides.close) {
+      if (stack.length > 0 && width >= stack[stack.length - 1]) {
+        cursor += stack.pop();
+        continue;
+      }
+      const opening = flankingSides(source, from - openingWidth, openingWidth, marker);
+      if (width > 0 && !ambiguousDelimiterPair(opening.close, sides.open, openingWidth, width)) {
+        const used = Math.min(needed, width);
+        pairs.push({ at: cursor, count: used });
+        needed -= used;
+        if (!collectAll || needed === 0) return pairs;
+        cursor += width;
+        continue;
+      }
+    }
+    if (sides.open) stack.push(width);
+    cursor += width;
   }
-  return matches.length ? matches : null;
+  return pairs.length > 0 ? pairs : null;
 }
 
-function hasClosingDelimiter(text, start, end, marker) {
-  for (let p = start; p < end; p++) {
-    if (text[p] === '\\') { p++; continue; }
-    if (text[p] === '`') {
-      const ticks = delimiterRunLength(text, p, '`');
-      const close = findCodeClosing(text, p + ticks, '`'.repeat(ticks));
-      if (close >= 0 && close < end) { p = close + ticks - 1; continue; }
+function containsClosingMarker(source, from, limit, marker) {
+  let cursor = from;
+  while (cursor < limit) {
+    if (source[cursor] === '\\') {
+      cursor += 2;
+      continue;
     }
-    if (text[p] === marker) {
-      const count = delimiterRunLength(text, p, marker);
-      if (delimiterInfo(text, p, count, marker).close) return true;
-      p += count - 1;
+    if (source[cursor] === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+      if (closing >= 0 && closing < limit) {
+        cursor = closing + width;
+        continue;
+      }
     }
+    if (source[cursor] === marker) {
+      const width = markerRun(source, cursor, marker);
+      if (flankingSides(source, cursor, width, marker).close) return true;
+      cursor += width;
+    } else cursor++;
   }
   return false;
 }
 
-function isUnicodeSpace(cp) {
-  return cp === 32 || cp === 9 || cp === 10 || cp === 13 || cp === 0x00a0 || cp === 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp === 0x2028 || cp === 0x2029 || cp === 0x202f || cp === 0x205f || cp === 0x3000;
+function unicodeWhitespace(code) {
+  if (code >= 0x2000 && code <= 0x200a) return true;
+  switch (code) {
+    case 9: case 10: case 13: case 32: case 0xa0: case 0x1680:
+    case 0x2028: case 0x2029: case 0x202f: case 0x205f: case 0x3000: return true;
+    default: return false;
+  }
 }
 
-function isUnicodePunctuation(cp) {
-  if (cp < 128) return (cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) || (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126);
-  return cp === 0x00a1 || cp === 0x00a3 || cp === 0x00a7 || cp === 0x00a9 || cp === 0x00ab || cp === 0x00ac || cp === 0x00ae || cp === 0x00b0 || cp === 0x00b1 || cp === 0x00b6 || cp === 0x00bb || cp === 0x00bf || cp === 0x00d7 || cp === 0x00f7 ||
-    (cp >= 0x2000 && cp <= 0x206f) || (cp >= 0x20a0 && cp <= 0x20cf) || (cp >= 0x2100 && cp <= 0x214f) || (cp >= 0x2190 && cp <= 0x2bff) || (cp >= 0x2e00 && cp <= 0x2e7f) || (cp >= 0x3001 && cp <= 0x303f) || (cp >= 0xfe10 && cp <= 0xfe6f) || (cp >= 0xff01 && cp <= 0xff0f) || (cp >= 0xff1a && cp <= 0xff20) || (cp >= 0xff3b && cp <= 0xff40) || (cp >= 0xff5b && cp <= 0xff65) || (cp >= 0x1f000 && cp <= 0x1faff);
+function unicodePunctuation(code) {
+  if (code < 128) {
+    return (code >= 123 && code <= 126) || (code >= 91 && code <= 96)
+      || (code >= 58 && code <= 64) || (code >= 33 && code <= 47);
+  }
+  switch (code) {
+    case 0xa1: case 0xa3: case 0xa7: case 0xa9: case 0xab: case 0xac: case 0xae:
+    case 0xb0: case 0xb1: case 0xb6: case 0xbb: case 0xbf: case 0xd7: case 0xf7: return true;
+  }
+  return (code >= 0x2000 && code <= 0x206f) || (code >= 0x20a0 && code <= 0x20cf)
+    || (code >= 0x2100 && code <= 0x214f) || (code >= 0x2190 && code <= 0x2bff)
+    || (code >= 0x2e00 && code <= 0x2e7f) || (code >= 0x3001 && code <= 0x303f)
+    || (code >= 0xfe10 && code <= 0xfe6f) || (code >= 0xff01 && code <= 0xff0f)
+    || (code >= 0xff1a && code <= 0xff20) || (code >= 0xff3b && code <= 0xff40)
+    || (code >= 0xff5b && code <= 0xff65) || (code >= 0x1f000 && code <= 0x1faff);
 }
 
-function inlineDestination(source, offset) {
-  let cursor = offset;
+function linkDestination(source, from) {
+  let cursor = from;
   while (isSpace(source[cursor])) cursor++;
   let address;
-  if (source.charCodeAt(cursor) === 60) {
+  if (source[cursor] === '<') {
     const begin = ++cursor;
-    for (; cursor < source.length; cursor++) {
-      const code = source.charCodeAt(cursor);
-      if (code === 10 || code === 13 || code === 60) return null;
-      if (code === 92 && PUNCT.includes(source[cursor + 1])) { cursor++; continue; }
-      if (code === 62) break;
+    while (cursor < source.length) {
+      const character = source[cursor];
+      if (character === '\r' || character === '\n' || character === '<') return null;
+      if (character === '\\' && PUNCT.includes(source[cursor + 1])) cursor += 2;
+      else if (character === '>') break;
+      else cursor++;
     }
     if (source[cursor] !== '>' || (cursor > begin && source[cursor - 1] === '\\')) return null;
-    address = source.slice(begin, cursor++);
+    address = source.slice(begin, cursor);
+    cursor++;
   } else {
     const begin = cursor;
-    let nesting = 0;
-    for (; cursor < source.length && !isSpace(source[cursor]); cursor++) {
-      const code = source.charCodeAt(cursor);
-      if (code === 92 && PUNCT.includes(source[cursor + 1])) { cursor++; continue; }
-      if (code === 40) nesting++;
-      else if (code === 41) {
-        if (nesting === 0) break;
-        nesting--;
+    let parentheses = 0;
+    while (cursor < source.length && !isSpace(source[cursor])) {
+      const character = source[cursor];
+      if (character === '\\' && PUNCT.includes(source[cursor + 1])) {
+        cursor += 2;
+        continue;
       }
+      if (character === '(') parentheses++;
+      else if (character === ')') {
+        if (parentheses === 0) break;
+        parentheses--;
+      }
+      cursor++;
     }
-    if (nesting !== 0) return null;
+    if (parentheses) return null;
     address = source.slice(begin, cursor);
   }
   while (isSpace(source[cursor])) cursor++;
-  let caption = '';
-  const delimiter = source[cursor];
-  if (delimiter === '"' || delimiter === "'" || delimiter === '(') {
-    const finish = findTitleEnd(source, cursor, delimiter === '(' ? ')' : delimiter);
-    if (finish < 0) return null;
-    caption = source.slice(cursor + 1, finish);
-    cursor = finish + 1;
+  let title = '';
+  const opening = source[cursor];
+  if (opening === '(' || opening === '"' || opening === "'") {
+    const closing = linkTitleLimit(source, cursor, opening === '(' ? ')' : opening);
+    if (closing < 0) return null;
+    title = source.slice(cursor + 1, closing);
+    cursor = closing + 1;
     while (isSpace(source[cursor])) cursor++;
   }
-  if (source.charCodeAt(cursor) !== 41) return null;
-  return [unescapePunctuation(address), unescapePunctuation(caption), cursor + 1];
+  return source[cursor] === ')'
+    ? [unescapePunctuation(address), unescapePunctuation(title), cursor + 1] : null;
 }
 
-function referenceDestination(source, label, offset, references) {
-  let key = label;
-  let finish = offset;
-  if (source.charCodeAt(offset) === 91) {
-    const bracket = source.indexOf(']', offset + 1);
-    if (bracket === -1) return null;
-    if (bracket !== offset + 1) key = source.slice(offset + 1, bracket);
-    finish = bracket + 1;
+function savedLinkDestination(source, label, from, references) {
+  let lookup = label;
+  let limit = from;
+  if (source[from] === '[') {
+    const closing = source.indexOf(']', from + 1);
+    if (closing < 0) return null;
+    if (closing > from + 1) lookup = source.slice(from + 1, closing);
+    limit = closing + 1;
   }
-  const saved = references[normalizeLabel(key)];
-  return saved ? [saved.url, saved.title, finish] : null;
+  const entry = references[normalizeLabel(lookup)];
+  return entry ? [entry.url, entry.title, limit] : null;
 }
 
-function parseLink(text, start, refs, probe = false) {
-  const isImage = text.charCodeAt(start) === 33;
-  const bracket = isImage ? start + 1 : start;
-  const labelEnd = findLabelClose(text, bracket);
-  if (labelEnd === text.length) return null;
-  const labelText = text.slice(bracket + 1, labelEnd);
-  if (hasTrailingTextAfterMixedCode(labelText)) return null;
-
-  const afterLabel = labelEnd + 1;
-  const destination = text.charCodeAt(afterLabel) === 40
-    ? inlineDestination(text, afterLabel + 1)
-    : referenceDestination(text, labelText, afterLabel, refs);
-  if (destination === null) return null;
-  if (!isImage && labelHasMarkdownLink(labelText, refs)) return null;
-  const nextPosition = destination[2];
-  if (probe) return { end: nextPosition };
-
-  const rendered = renderResolvedLink(labelText, destination[0], destination[1], isImage, refs);
-  return { end: nextPosition, html: rendered };
+function readInlineLink(source, start, references, probe = false) {
+  const image = source[start] === '!';
+  const opening = start + (image ? 1 : 0);
+  const closing = labelClosingBracket(source, opening);
+  if (closing === source.length) return null;
+  const label = source.slice(opening + 1, closing);
+  if (mixedCodeLabelTail(label)) return null;
+  const after = closing + 1;
+  const target = source[after] === '('
+    ? linkDestination(source, after + 1) : savedLinkDestination(source, label, after, references);
+  if (target === null || (!image && labelContainsLink(label, references))) return null;
+  if (probe) return { end: target[2] };
+  return { end: target[2], html: resolvedLinkHtml(label, target[0], target[1], image, references) };
 }
 
-function renderResolvedLink(label, address, caption, isImage, references) {
-  const target = cleanUrl(address);
-  const captionAttribute = caption.length ? ' title="' + escapeHtml(caption) + '"' : '';
-  const contents = renderInline(label, references, true);
-  if (isImage) {
-    const alternative = escapeHtml(stripInlineTags(contents), true);
-    return '<img src="' + target + '" alt="' + alternative + '"' + captionAttribute + '>';
-  }
-  return '<a href="' + target + '"' + captionAttribute + '>' + contents + '</a>';
+function resolvedLinkHtml(label, address, title, image, references) {
+  const href = cleanUrl(address);
+  const titleAttribute = title.length > 0 ? ' title="' + escapeHtml(title) + '"' : '';
+  const body = renderInline(label, references, true);
+  if (!image) return '<a href="' + href + '"' + titleAttribute + '>' + body + '</a>';
+  const alternative = escapeHtml(inlinePlainText(body), true);
+  return '<img src="' + href + '" alt="' + alternative + '"' + titleAttribute + '>';
 }
 
-function hasTrailingTextAfterMixedCode(label) {
-  if (label.indexOf('``') < 0) return false;
-  for (let i = 0; i < label.length; i++) {
-    if (label[i] === '\\') { i++; continue; }
-    if (label[i] !== '`') continue;
-    const count = delimiterRunLength(label, i, '`');
-    const close = findCodeClosing(label, i + count, '`'.repeat(count));
-    if (close >= 0) {
-      if (count > 1 && label.indexOf('`', i + count) < close && trimAscii(label.slice(close + count))) return true;
-      i = close + count - 1;
-    } else i += count - 1;
-  }
-  return false;
-}
-
-function labelHasMarkdownLink(label, refs) {
-  if (label.indexOf('[') < 0) return false;
-  for (let i = 0; i < label.length; i++) {
-    if (label[i] === '!' && label[i + 1] === '[') {
-      const image = parseLink(label, i, refs, true);
-      if (image) { i = image.end - 1; continue; }
-    }
-    if (label[i] !== '[' || (i > 0 && label[i - 1] === '\\')) continue;
-    const close = findLabelClose(label, i);
-    if (close >= label.length) continue;
-    if ((i === 0 || label[i - 1] !== '!') && parseLink(label, i, refs, true)) return true;
-  }
-  return false;
-}
-
-function findLabelClose(text, open) {
-  let depth = 1;
-  let literalLongRun = false;
-  for (let i = open + 1; i < text.length; i++) {
-    if (text[i] === '\\') { i++; continue; }
-    if (text[i] === '`') {
-      let count = delimiterRunLength(text, i, '`');
-      const close = findCodeClosing(text, i + count, '`'.repeat(count));
-      if (count > 1) {
-        const bracket = text.indexOf(']', i + count);
-        if (close < 0 || (bracket >= 0 && bracket < close && (text[bracket + 1] === '(' || text[bracket + 1] === '['))) literalLongRun = true;
-      }
-      if (!literalLongRun && close >= 0) {
-        i = close + count - 1;
-        continue;
-      }
-      i += count - 1;
+function mixedCodeLabelTail(source) {
+  if (!source.includes('``')) return false;
+  let cursor = 0;
+  while (cursor < source.length) {
+    if (source[cursor] === '\\') {
+      cursor += 2;
       continue;
     }
-    if (text[i] === '<') {
-      const end = inlineTagEnd(text, i);
-      if (end >= 0) { i = end; continue; }
+    if (source[cursor] !== '`') {
+      cursor++;
+      continue;
     }
-    if (text[i] === '[') depth++;
-    else if (text[i] === ']') {
-      depth--;
-      if (depth === 0) return i;
+    const width = markerRun(source, cursor, '`');
+    const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+    if (closing < 0) cursor += width;
+    else {
+      const mixed = width > 1 && source.indexOf('`', cursor + width) < closing;
+      if (mixed && trimAscii(source.slice(closing + width))) return true;
+      cursor = closing + width;
     }
   }
-  return text.length;
+  return false;
 }
 
-function inlineTagEnd(text, start) {
-  let quote = '';
-  for (let i = start + 1; i < text.length; i++) {
-    const c = text[i];
-    if (quote) { if (c === quote) quote = ''; continue; }
-    if (c === '"' || c === "'") quote = c;
-    else if (c === '>') return i;
-  }
-  return -1;
-}
-
-function stripInlineTags(text) {
-  if (text.indexOf('<') < 0) return text;
-  let out = '';
-  let inTag = false;
-  let quote = '';
-  for (let i = 0; i < text.length; i++) {
-    if (!inTag && text.startsWith('<img ', i)) {
-      const end = text.indexOf('>', i + 5);
-      if (end >= 0) {
-        const altAt = text.indexOf(' alt="', i + 5);
-        if (altAt >= 0 && altAt < end) {
-          const altEnd = text.indexOf('"', altAt + 6);
-          if (altEnd > altAt) out += text.slice(altAt + 6, altEnd).replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'");
-        }
-        i = end;
+function labelContainsLink(source, references) {
+  if (!source.includes('[')) return false;
+  let cursor = 0;
+  while (cursor < source.length) {
+    if (source[cursor] === '!' && source[cursor + 1] === '[') {
+      const image = readInlineLink(source, cursor, references, true);
+      if (image) {
+        cursor = image.end;
         continue;
       }
     }
-    const c = text[i];
-    if (inTag) {
-      if (quote) { if (c === quote) quote = ''; }
-      else if (c === '"' || c === "'") quote = c;
-      else if (c === '>') inTag = false;
-    } else if (c === '<') inTag = true;
-    else out += c;
+    if (source[cursor] === '[' && (cursor === 0 || source[cursor - 1] !== '\\')) {
+      const closing = labelClosingBracket(source, cursor);
+      if (closing < source.length && (cursor === 0 || source[cursor - 1] !== '!')
+        && readInlineLink(source, cursor, references, true)) return true;
+    }
+    cursor++;
   }
-  return out;
+  return false;
 }
 
-function findTitleEnd(text, start, closer) {
-  const opening = text[start];
-  for (let i = start + 1; i < text.length; i++) {
-    if (text[i] === '\n' || text[i] === '\r') return -1;
-    if (text[i] === '\\') { i++; continue; }
-    if (text[i] === closer) return i;
-    if (opening === '(' && text[i] === '(') return -1;
+function labelClosingBracket(source, opening) {
+  let nesting = 1;
+  let literalTicks = false;
+  let cursor = opening + 1;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (character === '`') {
+      const width = markerRun(source, cursor, '`');
+      const closing = closingBackticks(source, cursor + width, '`'.repeat(width));
+      if (width > 1) {
+        const bracket = source.indexOf(']', cursor + width);
+        const followedByTarget = source[bracket + 1] === '[' || source[bracket + 1] === '(';
+        if (closing < 0 || (bracket >= 0 && bracket < closing && followedByTarget)) literalTicks = true;
+      }
+      cursor = (!literalTicks && closing >= 0 ? closing : cursor) + width;
+      continue;
+    }
+    if (character === '<') {
+      const closing = tagClosingAngle(source, cursor);
+      if (closing >= 0) {
+        cursor = closing + 1;
+        continue;
+      }
+    }
+    if (character === '[') nesting++;
+    else if (character === ']' && --nesting === 0) return cursor;
+    cursor++;
+  }
+  return source.length;
+}
+
+function tagClosingAngle(source, opening) {
+  let quotedBy = '';
+  let cursor = opening + 1;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (quotedBy) {
+      if (character === quotedBy) quotedBy = '';
+    } else if (character === "'" || character === '"') quotedBy = character;
+    else if (character === '>') return cursor;
+    cursor++;
   }
   return -1;
 }
 
-function extendedUrlAt(text, i, emailPossible = true) {
+function inlinePlainText(source) {
+  if (!source.includes('<')) return source;
+  let rendered = '';
+  let withinTag = false;
+  let quotedBy = '';
+  let cursor = 0;
+  while (cursor < source.length) {
+    if (!withinTag && source.startsWith('<img ', cursor)) {
+      const closing = source.indexOf('>', cursor + 5);
+      if (closing >= 0) {
+        const alt = source.indexOf(' alt="', cursor + 5);
+        if (alt >= 0 && alt < closing) {
+          const limit = source.indexOf('"', alt + 6);
+          if (limit > alt) rendered += imageAlternativeText(source.slice(alt + 6, limit));
+        }
+        cursor = closing + 1;
+        continue;
+      }
+    }
+    const character = source[cursor++];
+    if (!withinTag) {
+      if (character === '<') withinTag = true;
+      else rendered += character;
+    } else if (quotedBy) {
+      if (character === quotedBy) quotedBy = '';
+    } else if (character === "'" || character === '"') quotedBy = character;
+    else if (character === '>') withinTag = false;
+  }
+  return rendered;
+}
+
+function imageAlternativeText(source) {
+  return source.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"').replaceAll('&#39;', "'");
+}
+
+function linkTitleLimit(source, start, delimiter) {
+  const parentheses = source[start] === '(';
+  let cursor = start + 1;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '\r' || character === '\n') return -1;
+    if (character === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (character === delimiter) return cursor;
+    if (parentheses && character === '(') return -1;
+    cursor++;
+  }
+  return -1;
+}
+
+function bareLinkAt(text, i, emailPossible = true) {
   if (i && isWord(text[i - 1])) return null;
   let start = i;
   let prefix = '';
@@ -1846,10 +2203,33 @@ function parseEmailAt(text, start, limit = text.length) {
   return { value: text.slice(start, finish), end: finish };
 }
 
-function isSpace(c) { return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }
-function isWord(c) { if (!c) return false; const n = c.charCodeAt(0); return isAlpha(n) || isDigit(n) || c === '_'; }
-function isAlpha(n) { return (n >= 65 && n <= 90) || (n >= 97 && n <= 122); }
-function isDigit(n) { return n >= 48 && n <= 57; }
-function isHex(n) { return isDigit(n) || (n >= 65 && n <= 70) || (n >= 97 && n <= 102); }
+function isSpace(character) {
+  switch (character) {
+    case '\t': case '\n': case '\r': case ' ': return true;
+    default: return false;
+  }
+}
 
-export { parse };
+function isDigit(code) {
+  return code <= 57 && code >= 48;
+}
+
+function isAlpha(code) {
+  return (code >= 97 && code <= 122) || (code >= 65 && code <= 90);
+}
+
+function isHex(code) {
+  if (isDigit(code)) return true;
+  return (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
+}
+
+function isWord(character) {
+  if (!character) return false;
+  if (character === '_') return true;
+  const code = character.charCodeAt(0);
+  return isDigit(code) || isAlpha(code);
+}
+
+export {
+  parse
+};
