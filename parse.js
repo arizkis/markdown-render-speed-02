@@ -323,6 +323,7 @@ function unescapePunctuation(text) {
 
 function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false, quoted = false) {
   const out = [];
+  const collecting = refs[COLLECT_REFS];
   let i = 0;
   while (i < lines.length) {
     if (isBlank(lines[i])) { i++; continue; }
@@ -331,7 +332,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       const definition = parseReferenceDefinition(lines, i, leadingSpaces(line));
       if (definition && saveReference(refs, definition)) { i = definition.next; continue; }
     }
-    if (isThematic(line)) { out.push('<hr>\n'); i++; continue; }
+    if (isThematic(line)) { if (!collecting) out.push('<hr>\n'); i++; continue; }
     const list = listStart(line);
     if (list) {
       const result = renderList(lines, i, refs, list, baseIndent);
@@ -342,7 +343,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       if (table) { out.push(table.html); i = table.next; continue; }
     }
     if (isHtmlBlockStart(line)) {
-      const block = [line];
+      const block = collecting ? null : [line];
       const tag = htmlBlockTag(line);
       const rawTag = tag === '!--' || tag === '?' || tag === '![CDATA[' || tag === 'script' || tag === 'style' || tag === 'pre' || tag === 'textarea';
       let endedByBlank = false;
@@ -350,11 +351,14 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       if (rawTag && !htmlBlockEnd(line, tag)) {
         while (i < lines.length) {
           const next = lines[i++];
-          block.push(next);
+          if (block) block.push(next);
           if (htmlBlockEnd(next, tag)) break;
         }
       } else if (!rawTag) {
-        while (i < lines.length && !isBlank(lines[i])) block.push(lines[i++]);
+        while (i < lines.length && !isBlank(lines[i])) {
+          if (block) block.push(lines[i]);
+          i++;
+        }
         endedByBlank = i < lines.length;
       }
       let joinNewline = !endedByBlank;
@@ -367,11 +371,17 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
         joinNewline = blankHasIndent;
       }
       if (quoted && !rawTag && i === lines.length) joinNewline = false;
-      out.push(block.join('\n') + (joinNewline ? '\n' : ''));
+      if (block) out.push(block.join('\n') + (joinNewline ? '\n' : ''));
       continue;
     }
     const fence = fenceStart(line);
     if (fence) {
+      if (collecting) {
+        i++;
+        while (i < lines.length && !fenceEnd(lines[i], fence)) i++;
+        if (i < lines.length) i++;
+        continue;
+      }
       const content = [];
       i++;
       const contentIndent = fence.ch === '~' ? 0 : fence.indent;
@@ -386,6 +396,10 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       continue;
     }
     if (isIndentedCode(line)) {
+      if (collecting) {
+        while (i < lines.length && (isBlank(lines[i]) || isIndentedCode(lines[i]))) i++;
+        continue;
+      }
       const content = [];
       while (i < lines.length) {
         if (isBlank(lines[i])) { content.push(stripIndent(lines[i], 4)); i++; continue; }
@@ -397,10 +411,10 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       continue;
     }
     const heading = atxHeading(line);
-    if (heading) { out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`); i++; continue; }
+    if (heading) { if (!collecting) out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`); i++; continue; }
     if (i + 1 < lines.length && !isBlank(line) && quoteLine(line) === null && !listStart(line) && !fenceStart(line)) {
       const level = setextLevel(lines[i + 1]);
-      if (level) { out.push(`<h${level}>${renderInline(trimAscii(line), refs)}</h${level}>\n`); i += 2; continue; }
+      if (level) { if (!collecting) out.push(`<h${level}>${renderInline(trimAscii(line), refs)}</h${level}>\n`); i += 2; continue; }
     }
     if (quoteLine(line) !== null) {
       const quote = [];
@@ -437,6 +451,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
         quote[quote.length - 2] += `\n${quote.pop()}`;
       }
       let quoteHtml = renderBlocks(quote, refs, inListItem, quotePrefixWidth(line), false, true);
+      if (collecting) continue;
       if (quote.length && isHtmlBlockStart(quote[0]) && !quote.some(isBlank) && quoteHtml.endsWith('\n')) quoteHtml = quoteHtml.slice(0, -1);
       out.push(`<blockquote>\n${quoteHtml}</blockquote>\n`);
       continue;
@@ -463,6 +478,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       if (startsParagraphBlock(lines, i, inListItem) && !isIndentedUnderline(lines[i]) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) break;
       para.push(lines[i++]);
     }
+    if (collecting) continue;
     if (setext) out.push(`<h${setext}>${renderInline(trimAscii(para.join('\n')), refs)}</h${setext}>\n`);
     else {
       const text = renderInline(para.join('\n'), refs);
@@ -1022,6 +1038,11 @@ function renderTable(lines, start, refs) {
   const headers = tableCells(lines[start]);
   const delimiter = tableCells(lines[start + 1]);
   if (!headers.length || headers.length !== delimiter.length) return null;
+  if (refs[COLLECT_REFS]) {
+    let i = start + 2;
+    while (i < lines.length && tableBodyContinues(lines, i)) i++;
+    return { html: '', next: i };
+  }
   const aligns = [];
   for (const cell of delimiter) {
     const s = cell.trim();
