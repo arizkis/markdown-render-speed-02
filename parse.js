@@ -1,5 +1,6 @@
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const PUNCT = "!\"#$%&'()*+,\-./:;<=>?@[\\]^_`{|}~";
+const COLLECT_REFS = Symbol('collect references');
 
 function escapeHtml(text, encode = false) {
   let out = '';
@@ -149,67 +150,14 @@ function findClosing(text, from, marker) {
 function parse(markdown) {
   const lines = splitLines(markdown);
   const refs = Object.create(null);
-  const body = [];
-  collectReferences(lines, refs, body);
-  let html = renderBlocks(body, refs);
+  refs[COLLECT_REFS] = true;
+  renderBlocks(lines, refs);
+  refs[COLLECT_REFS] = false;
+  let html = renderBlocks(lines, refs);
   if (!String(markdown).endsWith('\n') && String(markdown).endsWith('</blockquote>') && html.endsWith('</blockquote>\n')) {
     html = html.slice(0, -1);
   }
   return html;
-}
-
-function collectReferences(lines, refs, body) {
-  let fence = null;
-  let afterDefinition = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (fence) {
-      if (fenceEnd(line, fence)) fence = null;
-      body.push(line);
-      continue;
-    }
-    const possibleFence = fenceStart(line);
-    if (possibleFence) {
-      fence = possibleFence;
-      body.push(line);
-      afterDefinition = false;
-      continue;
-    }
-    const quote = quoteReferencePrefix(line);
-    if (quote) {
-      const parsed = parseReferenceDefinition([quote.rest], 0, 0);
-      if (parsed && saveReference(refs, parsed)) {
-        body.push(quote.prefix);
-        afterDefinition = true;
-        continue;
-      }
-    }
-    const leading = leadingSpaces(line);
-    if (leading >= 4) { body.push(line); continue; }
-    if (leading <= 3 && line[leading] === '[') {
-      const previousBlank = i === 0 || isBlank(lines[i - 1]);
-      const previousHeading = i > 0 && atxHeading(lines[i - 1]);
-      if (previousBlank || afterDefinition || previousHeading) {
-        const parsed = parseReferenceDefinition(lines, i, leading);
-        if (parsed && saveReference(refs, parsed)) {
-          i = parsed.next - 1;
-          afterDefinition = true;
-          continue;
-        }
-      }
-    }
-    body.push(line);
-    afterDefinition = false;
-  }
-}
-
-function quoteReferencePrefix(line) {
-  let i = 0;
-  while (i < line.length && i < 3 && line[i] === ' ') i++;
-  if (line[i] !== '>') return null;
-  const markerEnd = i + 1;
-  if (line[markerEnd] === ' ') return { prefix: line.slice(0, markerEnd + 1), rest: line.slice(markerEnd + 1) };
-  return { prefix: line.slice(0, markerEnd), rest: line.slice(markerEnd) };
 }
 
 function saveReference(refs, parsed) {
@@ -217,12 +165,6 @@ function saveReference(refs, parsed) {
   if (!label) return false;
   if (!Object.prototype.hasOwnProperty.call(refs, label)) refs[label] = { url: parsed.url, title: parsed.title };
   return true;
-}
-
-function isDefinitionLike(line) {
-  const leading = leadingSpaces(line);
-  if (leading > 3 || line[leading] !== '[') return false;
-  return findUnescaped(line, ']:', leading + 1) > leading + 1;
 }
 
 function parseReferenceDefinition(lines, start, leading) {
@@ -371,6 +313,10 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
   while (i < lines.length) {
     if (isBlank(lines[i])) { i++; continue; }
     const line = lines[i];
+    if (indentColumns(line) < 4 && line[leadingSpaces(line)] === '[') {
+      const definition = parseReferenceDefinition(lines, i, leadingSpaces(line));
+      if (definition && saveReference(refs, definition)) { i = definition.next; continue; }
+    }
     if (isThematic(line)) { out.push('<hr>\n'); i++; continue; }
     const list = listStart(line);
     if (list) {
@@ -819,6 +765,10 @@ function tightListItem(lines, refs, baseIndent) {
   let i = 0;
   while (i < lines.length) {
     if (isBlank(lines[i])) { i++; continue; }
+    if (indentColumns(lines[i]) < 4 && lines[i][leadingSpaces(lines[i])] === '[') {
+      const definition = parseReferenceDefinition(lines, i, leadingSpaces(lines[i]));
+      if (definition) { i = definition.next; continue; }
+    }
     const heading = atxHeading(lines[i]);
     if (heading) {
       out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`);
@@ -1145,6 +1095,7 @@ function findStrikeClose(text, start, refs) {
 }
 
 function renderInline(text, refs, suppressBareUrls = false) {
+  if (refs[COLLECT_REFS]) return '';
   const out = [];
   const codeMask = inlineCodeMask(text);
   let i = 0;
