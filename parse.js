@@ -78,7 +78,6 @@ function stripIndent(line, count) {
 }
 
 function stripFencedIndent(line, count, baseIndent) {
-  if (!baseIndent) return stripIndent(line, count);
   let i = 0;
   let column = baseIndent;
   let remaining = count;
@@ -105,6 +104,13 @@ function stripFencedIndent(line, count, baseIndent) {
     end++;
   }
   return prefix + leading + line.slice(end);
+}
+
+function stripFenceContent(line, count, baseIndent) {
+  if (baseIndent) return stripFencedIndent(line, count, baseIndent);
+  let i = 0;
+  while (i < count && (line[i] === ' ' || line[i] === '\t')) i++;
+  return line.slice(i);
 }
 
 function splitLines(markdown) {
@@ -361,7 +367,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
     if (fence) {
       const content = [];
       i++;
-      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFencedIndent(lines[i++], fence.indent, baseIndent));
+      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFenceContent(lines[i++], fence.indent, baseIndent));
       if (i < lines.length) i++;
       const info = fence.info;
       let language = '';
