@@ -1,6 +1,7 @@
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const PUNCT = "!\"#$%&'()*+,\-./:;<=>?@[\\]^_`{|}~";
 const COLLECT_REFS = Symbol('collect references');
+const IN_RAW_LINK = Symbol('inside an HTML anchor');
 
 function escapeHtml(text, encode = false) {
   let out = '';
@@ -153,6 +154,7 @@ function parse(markdown) {
   refs[COLLECT_REFS] = true;
   renderBlocks(lines, refs);
   refs[COLLECT_REFS] = false;
+  refs[IN_RAW_LINK] = false;
   let html = renderBlocks(lines, refs);
   if (!String(markdown).endsWith('\n') && String(markdown).endsWith('</blockquote>') && html.endsWith('</blockquote>\n')) {
     html = html.slice(0, -1);
@@ -749,8 +751,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
       task = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox"> `;
       item[0] = item[0].slice(4);
     }
-    const inner = renderBlocks(item, refs, true, item.baseIndent);
-    let body = (loose ? inner : tightListItem(item, refs, item.baseIndent));
+    let body = loose ? renderBlocks(item, refs, true, item.baseIndent) : tightListItem(item, refs, item.baseIndent);
     if (!loose && item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
     const taskBody = task ? (loose ? body.replace('<p>', `<p>${task}`) : task + body) : body;
     out.push(`<li>${taskBody}</li>\n`);
@@ -1075,7 +1076,7 @@ function findStrikeClose(text, start, refs) {
       if (end >= 0) { i = end + 1; continue; }
     }
     if (text[i] === '[' || (text[i] === '!' && text[i + 1] === '[')) {
-      const link = parseLink(text, i, refs);
+      const link = parseLink(text, i, refs, true);
       if (link) { i = link.end; continue; }
     }
     if (text[i] !== '~') { i++; continue; }
@@ -1153,6 +1154,9 @@ function renderInline(text, refs, suppressBareUrls = false) {
           out.push(`<a href="${cleanUrl(href)}">${escapeHtml(inside)}</a>`); i = close + 1; continue;
         }
         if (isInlineHtml(inside)) {
+          const tag = inside.toLowerCase();
+          if (tag === '/a') refs[IN_RAW_LINK] = false;
+          else if (tag[0] === 'a' && (tag.length === 1 || isSpace(tag[1]) || tag[1] === '/')) refs[IN_RAW_LINK] = true;
           let end = close + 1;
           if (inside[0] === '/' && text[end] === '<') {
             const nextEnd = inlineTagEnd(text, end);
@@ -1170,7 +1174,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         if (shortcut) { out.push(shortcut.html); i = shortcut.end; continue; }
       }
     }
-    const url = suppressBareUrls ? null : extendedUrlAt(text, i);
+    const url = suppressBareUrls || refs[IN_RAW_LINK] ? null : extendedUrlAt(text, i);
     if (url) { out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`); i = url.end; continue; }
     if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
       const end = findStrikeClose(text, i, refs);
@@ -1355,7 +1359,7 @@ function scanDelimiters(text, from, marker, openerCount, skipOther, collect, ref
       if (end >= 0) { p = end + 1; continue; }
     }
     if (text[p] === '[' || (text[p] === '!' && text[p + 1] === '[')) {
-      const link = parseLink(text, p, refs);
+      const link = parseLink(text, p, refs, true);
       if (link) { p = link.end; continue; }
     }
     if (skipOther && (text[p] === '*' || text[p] === '_') && text[p] !== marker) {
@@ -1428,7 +1432,7 @@ function isUnicodePunctuation(cp) {
     (cp >= 0x2000 && cp <= 0x206f) || (cp >= 0x20a0 && cp <= 0x20cf) || (cp >= 0x2100 && cp <= 0x214f) || (cp >= 0x2190 && cp <= 0x2bff) || (cp >= 0x2e00 && cp <= 0x2e7f) || (cp >= 0x3001 && cp <= 0x303f) || (cp >= 0xfe10 && cp <= 0xfe6f) || (cp >= 0xff01 && cp <= 0xff0f) || (cp >= 0xff1a && cp <= 0xff20) || (cp >= 0xff3b && cp <= 0xff40) || (cp >= 0xff5b && cp <= 0xff65) || (cp >= 0x1f000 && cp <= 0x1faff);
 }
 
-function parseLink(text, start, refs) {
+function parseLink(text, start, refs, probe = false) {
   const image = text[start] === '!';
   const open = start + (image ? 1 : 0);
   const close = findLabelClose(text, open);
@@ -1495,6 +1499,7 @@ function parseLink(text, start, refs) {
     } else return null;
   }
   if (!image && labelHasMarkdownLink(label, refs)) return null;
+  if (probe) return { end };
   const safe = cleanUrl(href);
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
   const content = image ? stripInlineTags(renderInline(label, refs, true)) : renderInline(label, refs, true);
@@ -1504,15 +1509,13 @@ function parseLink(text, start, refs) {
 function labelHasMarkdownLink(label, refs) {
   for (let i = 0; i < label.length; i++) {
     if (label[i] === '!' && label[i + 1] === '[') {
-      const image = parseLink(label, i, refs);
+      const image = parseLink(label, i, refs, true);
       if (image) { i = image.end - 1; continue; }
     }
     if (label[i] !== '[' || (i > 0 && label[i - 1] === '\\')) continue;
     const close = findLabelClose(label, i);
     if (close >= label.length) continue;
-    const next = label[close + 1];
-    if ((next === '(' || next === '[') && (i === 0 || label[i - 1] !== '!')) return true;
-    if ((i === 0 || label[i - 1] !== '!') && refs[normalizeLabel(label.slice(i + 1, close))]) return true;
+    if ((i === 0 || label[i - 1] !== '!') && parseLink(label, i, refs, true)) return true;
   }
   return false;
 }
