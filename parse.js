@@ -315,7 +315,7 @@ function unescapePunctuation(text) {
   return out;
 }
 
-function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false) {
+function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false, quoted = false) {
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -360,6 +360,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
         }
         joinNewline = blankHasIndent;
       }
+      if (quoted && !rawTag && i === lines.length) joinNewline = false;
       out.push(block.join('\n') + (joinNewline ? '\n' : ''));
       continue;
     }
@@ -420,7 +421,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
           i++;
           continue;
         }
-        if (!quoteBlankSeen && !isBlank(lines[i]) && !isThematic(lines[i]) && !fenceStart(lines[i]) && !listStart(lines[i]) && !atxHeading(lines[i]) && !isIndentedCode(lines[i])) {
+        if (!quoteBlankSeen && !isBlank(lines[i]) && !isThematic(lines[i]) && !fenceStart(lines[i]) && !listStart(lines[i]) && !atxHeading(lines[i]) && !isIndentedCode(lines[i]) && (!isHtmlBlockStart(lines[i]) || isStandaloneInlineTag(lines[i]))) {
           quote.push(setextLevel(lines[i]) ? `    ${lines[i++]}` : lines[i++]);
           continue;
         }
@@ -429,7 +430,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       if (quote.length > 1 && isBlank(quote[quote.length - 1]) && quote[quote.length - 1].length > 0) {
         quote[quote.length - 2] += `\n${quote.pop()}`;
       }
-      let quoteHtml = renderBlocks(quote, refs, inListItem, quotePrefixWidth(line));
+      let quoteHtml = renderBlocks(quote, refs, inListItem, quotePrefixWidth(line), false, true);
       if (quote.length && isHtmlBlockStart(quote[0]) && !quote.some(isBlank) && quoteHtml.endsWith('\n')) quoteHtml = quoteHtml.slice(0, -1);
       out.push(`<blockquote>\n${quoteHtml}</blockquote>\n`);
       continue;
@@ -768,7 +769,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
       item[0] = item[0].slice(4);
     }
     let body = loose ? renderBlocks(item, refs, true, item.baseIndent) : tightListItem(item, refs, item.baseIndent);
-    if (!loose && item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
+    if (item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
     const taskBody = task ? (loose ? body.replace('<p>', `<p>${task}`) : task + body) : body;
     out.push(`<li>${taskBody}</li>\n`);
   }
