@@ -1112,6 +1112,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
   if (refs[COLLECT_REFS]) return '';
   const out = [];
   const codeMask = inlineCodeMask(text);
+  const lastEmailAt = text.lastIndexOf('@');
   let i = 0;
   let literalLabelEnd = -1;
   while (i < text.length) {
@@ -1200,7 +1201,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         if (shortcut) { out.push(shortcut.html); i = shortcut.end; continue; }
       }
     }
-    const url = suppressBareUrls || refs[IN_RAW_LINK] ? null : extendedUrlAt(text, i);
+    const url = suppressBareUrls || refs[IN_RAW_LINK] ? null : extendedUrlAt(text, i, i < lastEmailAt);
     if (url) { out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`); i = url.end; continue; }
     if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
       const end = findStrikeClose(text, i, refs);
@@ -1692,12 +1693,13 @@ function findTitleEnd(text, start, closer) {
   return -1;
 }
 
-function extendedUrlAt(text, i) {
+function extendedUrlAt(text, i, emailPossible = true) {
   if (i && isWord(text[i - 1])) return null;
   let start = i;
   let prefix = '';
   let schemeEnd = i;
-  if (isAlpha(text.charCodeAt(i))) {
+  const initial = text.charCodeAt(i) | 32;
+  if (emailPossible && (initial === 109 || initial === 120)) {
     while (isAlpha(text.charCodeAt(schemeEnd)) || isDigit(text.charCodeAt(schemeEnd)) || text[schemeEnd] === '+' || text[schemeEnd] === '-' || text[schemeEnd] === '.') schemeEnd++;
     if (text[schemeEnd] === ':' && schemeEnd - i >= 2 && (text.slice(i, schemeEnd).toLowerCase() === 'mailto' || text.slice(i, schemeEnd).toLowerCase() === 'xmpp')) {
       const scheme = text.slice(i, schemeEnd).toLowerCase();
@@ -1716,12 +1718,10 @@ function extendedUrlAt(text, i) {
       }
     }
   }
-  const scheme8 = text.slice(i, i + 8).toLowerCase();
-  const scheme7 = text.slice(i, i + 7).toLowerCase();
-  if (scheme8 === 'https://') prefix = text.slice(i, i + 8);
-  else if (scheme7 === 'http://') prefix = text.slice(i, i + 7);
-  else if (text.startsWith('www.', i)) prefix = 'www.';
-  else if (isAlpha(text.charCodeAt(i))) {
+  if (initial === 104 && text.slice(i, i + 8).toLowerCase() === 'https://') prefix = text.slice(i, i + 8);
+  else if (initial === 104 && text.slice(i, i + 7).toLowerCase() === 'http://') prefix = text.slice(i, i + 7);
+  else if (initial === 119 && text.startsWith('www.', i)) prefix = 'www.';
+  else if (emailPossible && isAlpha(text.charCodeAt(i))) {
     const email = parseEmailAt(text, i);
     if (!email) return null;
     return { href: `mailto:${email.value}`, label: email.value, end: email.end };
