@@ -5,15 +5,21 @@ const IN_RAW_LINK = Symbol('inside an HTML anchor');
 
 function escapeHtml(text, encode = false) {
   let out = '';
+  let start = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
+    let escaped;
     if (c === '&') {
       const end = encode ? i : entityAt(text, i);
-      if (end > i) { out += text.slice(i, end); i = end - 1; }
-      else out += '&amp;';
-    } else out += ESC[c] || c;
+      if (end > i) { i = end - 1; continue; }
+      escaped = '&amp;';
+    } else escaped = ESC[c];
+    if (escaped) {
+      out += text.slice(start, i) + escaped;
+      start = i + 1;
+    }
   }
-  return out;
+  return start ? out + text.slice(start) : text;
 }
 
 function cleanUrl(url) {
@@ -1120,8 +1126,17 @@ function renderInline(text, refs, suppressBareUrls = false) {
       if (PUNCT.includes(text[i + 1])) { out.push(escapeHtml(text[i + 1])); i += 2; continue; }
     }
     if (c === '\n') {
-      let spaces = 0; while (out.length && out[out.length - 1] === ' ') { out.pop(); spaces++; }
-      out.push(spaces >= 2 ? '<br>' : `${' '.repeat(spaces)}\n`);
+      let spaces = 0;
+      for (let p = i - 1; p >= 0 && text[p] === ' '; p--) spaces++;
+      if (spaces >= 2) {
+        let remaining = spaces;
+        while (remaining > 0 && out.length) {
+          const tail = out.pop();
+          if (tail.length <= remaining) remaining -= tail.length;
+          else { out.push(tail.slice(0, -remaining)); remaining = 0; }
+        }
+      }
+      out.push(spaces >= 2 ? '<br>' : '\n');
       i++;
       if (spaces >= 2) while (text[i] === ' ' || text[i] === '\t') i++;
       continue;
@@ -1214,7 +1229,15 @@ function renderInline(text, refs, suppressBareUrls = false) {
       }
       if (!canOpen && n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
     }
-    out.push(escapeHtml(c)); i++;
+    let end = i + 1;
+    while (end < text.length) {
+      const next = text.charCodeAt(end);
+      if (next === 10 || next === 92 || next === 96 || next === 38 || next === 60 || next === 91 || next === 93 || next === 33 || next === 42 || next === 95 || next === 126) break;
+      if (!suppressBareUrls && !refs[IN_RAW_LINK] && isAlpha(next) && !isWord(text[end - 1])) break;
+      end++;
+    }
+    out.push(escapeHtml(text.slice(i, end)));
+    i = end;
   }
   return out.join('');
 }
