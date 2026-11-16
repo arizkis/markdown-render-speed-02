@@ -1399,20 +1399,21 @@ function parseLink(text, start, refs) {
       href = ref.url; title = ref.title;
     } else return null;
   }
-  if (!image && labelHasMarkdownLink(label)) return null;
+  if (!image && labelHasMarkdownLink(label, refs)) return null;
   const safe = cleanUrl(href);
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
   const content = image ? stripInlineTags(renderInline(label, refs, true)) : renderInline(label, refs, true);
   return { html: image ? `<img src="${safe}" alt="${escapeHtml(content, true)}"${titleAttr}>` : `<a href="${safe}"${titleAttr}>${content}</a>`, end };
 }
 
-function labelHasMarkdownLink(label) {
+function labelHasMarkdownLink(label, refs) {
   for (let i = 0; i < label.length; i++) {
     if (label[i] !== '[' || (i > 0 && label[i - 1] === '\\')) continue;
     const close = findLabelClose(label, i);
     if (close >= label.length) continue;
     const next = label[close + 1];
     if ((next === '(' || next === '[') && (i === 0 || label[i - 1] !== '!')) return true;
+    if ((i === 0 || label[i - 1] !== '!') && refs[normalizeLabel(label.slice(i + 1, close))]) return true;
   }
   return false;
 }
@@ -1525,15 +1526,19 @@ function extendedUrlAt(text, i) {
   } else return null;
   let p = i + prefix.length;
   while (p < text.length && !isSpace(text[p]) && text[p] !== '<' && text[p] !== '>' && text[p] !== '"') p++;
-  while (p > i && (text[p - 1] === '.' || text[p - 1] === ',' || text[p - 1] === ':' || text[p - 1] === ';' || text[p - 1] === '!' || text[p - 1] === '?')) p--;
+  while (true) {
+    const before = p;
+    while (p > i && (text[p - 1] === '.' || text[p - 1] === ',' || text[p - 1] === ':' || text[p - 1] === ';' || text[p - 1] === '!' || text[p - 1] === '?')) p--;
+    while (p > i && text[p - 1] === ')') {
+      let opens = 0, closes = 0;
+      for (let q = i; q < p; q++) { if (text[q] === '(') opens++; else if (text[q] === ')') closes++; }
+      if (closes <= opens) break;
+      p--;
+    }
+    if (p === before) break;
+  }
   const amp = text.lastIndexOf('&', p - 1);
   if (amp >= i && text.slice(amp + 1, p).indexOf('=') < 0) p = amp;
-  while (p > i && text[p - 1] === ')') {
-    let opens = 0, closes = 0;
-    for (let q = i; q < p; q++) { if (text[q] === '(') opens++; else if (text[q] === ')') closes++; }
-    if (closes <= opens) break;
-    p--;
-  }
   if (p <= start + prefix.length) return null;
   const label = text.slice(start, p);
   if (prefix === 'www.') return { href: `http://${label}`, label, end: p };
