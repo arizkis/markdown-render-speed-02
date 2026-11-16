@@ -2,6 +2,8 @@ const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;
 const PUNCT = "!\"#$%&'()*+,\-./:;<=>?@[\\]^_`{|}~";
 const COLLECT_REFS = Symbol('collect references');
 const IN_RAW_LINK = Symbol('inside an HTML anchor');
+const INLINE_SPECIAL = new Uint8Array(128);
+for (const c of '\n\\`&<[]!*_~"\'>') INLINE_SPECIAL[c.charCodeAt(0)] = 1;
 
 function escapeHtml(text, encode = false) {
   let out = '';
@@ -27,12 +29,7 @@ function escapeHtml(text, encode = false) {
 function cleanUrl(url) {
   let encoded = '';
   try { encoded = encodeURI(url.trim()); } catch { encoded = url.trim(); }
-  let stable = '';
-  for (let i = 0; i < encoded.length; i++) {
-    if (encoded[i] === '%' && encoded.slice(i, i + 3).toLowerCase() === '%25') { stable += '%'; i += 2; }
-    else stable += encoded[i];
-  }
-  return escapeHtml(stable, false);
+  return escapeHtml(encoded.replaceAll('%25', '%'), false);
 }
 
 function normalizeLabel(label) {
@@ -315,6 +312,7 @@ function findUnescaped(text, needle, from = 0) {
 function hasNewline(text) { return text.includes('\n') || text.includes('\r'); }
 
 function unescapePunctuation(text) {
+  if (text.indexOf('\\') < 0) return text;
   let out = '';
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '\\' && i + 1 < text.length && PUNCT.includes(text[i + 1])) out += text[++i];
@@ -510,6 +508,7 @@ function quotePrefixWidth(line) {
 }
 
 function expandQuoteTabs(text, column) {
+  if (text.indexOf('\t') < 0) return text;
   let out = '';
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '\t') {
@@ -1074,13 +1073,7 @@ function renderTable(lines, start, refs) {
   const tagRow = (cells, tag) => {
     const out = ['<tr>\n'];
     for (let n = 0; n < headers.length; n++) {
-      let value = trimAscii(cells[n] ?? '');
-      let unescaped = '';
-      for (let q = 0; q < value.length; q++) {
-        if (value[q] === '\\' && value[q + 1] === '|') { unescaped += '|'; q++; }
-        else unescaped += value[q];
-      }
-      value = unescaped;
+      const value = trimAscii(cells[n] ?? '').replaceAll('\\|', '|');
       const align = aligns[n] ? ` align="${aligns[n]}"` : '';
       out.push(`<${tag}${align}>${renderInline(value, refs)}</${tag}>\n`);
     }
@@ -1278,7 +1271,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
     let end = i + 1;
     while (end < text.length) {
       const next = text.charCodeAt(end);
-      if (next === 10 || next === 92 || next === 96 || next === 38 || next === 60 || next === 91 || next === 93 || next === 33 || next === 42 || next === 95 || next === 126 || next === 34 || next === 39 || next === 62) break;
+      if (INLINE_SPECIAL[next]) break;
       if (!suppressBareUrls && !refs[IN_RAW_LINK] && (end < lastEmailAt || (next | 32) === 104 || next === 119) && isAlpha(next) && !isWord(text[end - 1])) break;
       end++;
     }
@@ -1703,6 +1696,7 @@ function inlineTagEnd(text, start) {
 }
 
 function stripInlineTags(text) {
+  if (text.indexOf('<') < 0) return text;
   let out = '';
   let inTag = false;
   let quote = '';
