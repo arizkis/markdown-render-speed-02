@@ -347,12 +347,12 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
       }
       let joinNewline = !endedByBlank;
       if (rawTag && i < lines.length && isBlank(lines[i])) {
-        let blankHasTab = false;
+        let blankHasIndent = false;
         while (i < lines.length && isBlank(lines[i])) {
-          if (lines[i].includes('\t')) blankHasTab = true;
+          if (lines[i].length) blankHasIndent = true;
           i++;
         }
-        joinNewline = tag === '!--' ? blankHasTab : false;
+        joinNewline = blankHasIndent;
       }
       out.push(block.join('\n') + (joinNewline ? '\n' : ''));
       continue;
