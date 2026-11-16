@@ -565,12 +565,12 @@ function atxHeading(line) {
 
 function setextLevel(line) {
   if (indentColumns(line) >= 4) return 0;
-  const s = trimAscii(line);
-  if (!s) return 0;
-  const c = s[0];
+  let i = leadingSpaces(line);
+  const c = line[i];
   if (c !== '=' && c !== '-') return 0;
-  for (let i = 1; i < s.length; i++) if (s[i] !== c) return 0;
-  return c === '=' ? 1 : 2;
+  while (line[i] === c) i++;
+  while (line[i] === ' ' || line[i] === '\t') i++;
+  return i === line.length ? (c === '=' ? 1 : 2) : 0;
 }
 
 function isIndentedUnderline(line) {
@@ -596,7 +596,7 @@ function isThematic(line) {
 
 function fenceStart(line) {
   let n = 0;
-  while (n < line.length && line[n] === ' ') n++;
+  while (n < 4 && line[n] === ' ') n++;
   if (n > 3 || (line[n] !== '`' && line[n] !== '~')) return null;
   const ch = line[n]; let j = n;
   while (j < line.length && line[j] === ch) j++;
@@ -616,9 +616,9 @@ function fenceEnd(line, fence) {
 function isIndentedCode(line) { return indentColumns(line) >= 4; }
 
 function listStart(line) {
-  let i = 0; while (i < line.length && line[i] === ' ') i++;
+  let i = 0; while (i < 4 && line[i] === ' ') i++;
   if (i > 3) return null;
-  const indent = indentColumns(line.slice(0, i));
+  const indent = i;
   const marker = line[i];
   if (marker === '*' || marker === '-' || marker === '+') {
     let end = i + 1;
@@ -1154,6 +1154,28 @@ function renderInline(text, refs, suppressBareUrls = false) {
   let literalLabelEnd = -1;
   while (i < text.length) {
     const c = text[i];
+    const initial = text.charCodeAt(i);
+    if (!INLINE_SPECIAL[initial]) {
+      const bare = !suppressBareUrls && !refs[IN_RAW_LINK];
+      if (bare && ((initial | 32) === 104 || initial === 119 || (i < lastEmailAt && isAlpha(initial))) && (i === 0 || !isWord(text[i - 1]))) {
+        const url = extendedUrlAt(text, i, i < lastEmailAt);
+        if (url) {
+          out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`);
+          i = url.end;
+          continue;
+        }
+      }
+      let end = i + 1;
+      while (end < text.length) {
+        const next = text.charCodeAt(end);
+        if (INLINE_SPECIAL[next]) break;
+        if (bare && (end < lastEmailAt || (next | 32) === 104 || next === 119) && isAlpha(next) && !isWord(text[end - 1])) break;
+        end++;
+      }
+      out.push(text.slice(i, end));
+      i = end;
+      continue;
+    }
     if (c === '\\' && i + 1 < text.length) {
       if (text[i + 1] === '\n') {
         out.push('<br>');
@@ -1238,8 +1260,6 @@ function renderInline(text, refs, suppressBareUrls = false) {
         if (shortcut) { out.push(shortcut.html); i = shortcut.end; continue; }
       }
     }
-    const url = suppressBareUrls || refs[IN_RAW_LINK] ? null : extendedUrlAt(text, i, i < lastEmailAt);
-    if (url) { out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`); i = url.end; continue; }
     if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
       const end = findStrikeClose(text, i, refs);
       if (end > i + 2 && !isSpace(text[end - 1])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs, suppressBareUrls)}</del>`); i = end + 2; continue; }
@@ -1267,16 +1287,8 @@ function renderInline(text, refs, suppressBareUrls = false) {
       }
       if (!canOpen && n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
     }
-    if (ESC[c]) { out.push(ESC[c]); i++; continue; }
-    let end = i + 1;
-    while (end < text.length) {
-      const next = text.charCodeAt(end);
-      if (INLINE_SPECIAL[next]) break;
-      if (!suppressBareUrls && !refs[IN_RAW_LINK] && (end < lastEmailAt || (next | 32) === 104 || next === 119) && isAlpha(next) && !isWord(text[end - 1])) break;
-      end++;
-    }
-    out.push(text.slice(i, end));
-    i = end;
+    out.push(ESC[c] || c);
+    i++;
   }
   return out.join('');
 }

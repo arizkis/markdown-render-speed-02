@@ -10,6 +10,7 @@ const sourceOf = item => typeof item === 'string' ? item : item?.markdown ?? '';
 function timeRange(start, end) {
   let total = 0;
   let bytes = 0;
+  const cpuStart = process.cpuUsage();
   for (let i = start; i < end; i++) {
     const source = sourceOf(cases[i]);
     const t = performance.now();
@@ -17,12 +18,16 @@ function timeRange(start, end) {
     total += performance.now() - t;
     bytes += source.length;
   }
-  return { total, bytes, count: Math.max(0, end - start) };
+  const cpu = process.cpuUsage(cpuStart);
+  return { total, cpuMs: (cpu.user + cpu.system) / 1000, bytes, count: Math.max(0, end - start) };
 }
 
 // Warm once so the reported numbers include compiled hot paths rather than startup effects.
 for (let i = 0; i < Math.min(680, cases.length); i++) parse(sourceOf(cases[i]));
+if (process.argv.includes('--warm-docs')) {
+  for (let i = 680; i < cases.length; i++) parse(sourceOf(cases[i]));
+}
 const spec = timeRange(0, Math.min(680, cases.length));
 const docs = timeRange(Math.min(680, cases.length), cases.length);
-console.log(`SPEC cases=${spec.count} chars=${spec.bytes} ms=${spec.total.toFixed(3)}`);
-console.log(`DOCS cases=${docs.count} chars=${docs.bytes} ms=${docs.total.toFixed(3)}`);
+console.log(`SPEC cases=${spec.count} chars=${spec.bytes} ms=${spec.total.toFixed(3)} cpu_ms=${spec.cpuMs.toFixed(3)}`);
+console.log(`DOCS cases=${docs.count} chars=${docs.bytes} ms=${docs.total.toFixed(3)} cpu_ms=${docs.cpuMs.toFixed(3)}`);
