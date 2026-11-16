@@ -736,9 +736,13 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
         activeFence = fenceStart(value);
         fenceFirstContent = !!activeFence;
         const nestedFromValue = listStart(value);
-        if (!activeFence && nestedFromValue && !item.hasNestedMarker) {
+        if (!activeFence && nestedFromValue) {
           item.hasNestedMarker = true;
-          item.nestedContentIndent = item.contentIndent + nestedFromValue.contentIndent;
+          const nestedIndent = item.contentIndent + nestedFromValue.indent;
+          if (nestedIndent <= item.nestedMarkerIndent) {
+            item.nestedMarkerIndent = nestedIndent;
+            item.nestedContentIndent = item.contentIndent + nestedFromValue.contentIndent;
+          }
         }
         item.push(value);
       }
