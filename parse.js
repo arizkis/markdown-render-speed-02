@@ -309,7 +309,7 @@ function unescapePunctuation(text) {
   return out;
 }
 
-function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
+function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = false) {
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -450,7 +450,10 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
       para.push(lines[i++]);
     }
     if (setext) out.push(`<h${setext}>${renderInline(trimAscii(para.join('\n')), refs)}</h${setext}>\n`);
-    else out.push(`<p>${renderInline(para.join('\n'), refs)}</p>\n`);
+    else {
+      const text = renderInline(para.join('\n'), refs);
+      out.push(tight ? text : `<p>${text}</p>\n`);
+    }
   }
   return out.join('');
 }
@@ -779,7 +782,7 @@ function tightListItem(lines, refs, baseIndent) {
       continue;
     }
     if (startsBlock(lines, i) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) {
-      out.push(renderBlocks(lines.slice(i), refs, true, baseIndent)); break;
+      out.push(renderBlocks(lines.slice(i), refs, true, baseIndent, true)); break;
     }
     const p = [lines[i++]];
     let level = 0;
