@@ -726,7 +726,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
       if (indentColumns(lines[i]) >= item.contentIndent) {
         let value = stripIndent(lines[i], item.contentIndent);
         if (value[0] === '\t') value = ' ' + value.slice(1);
-        if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
+        if (lines[i].startsWith('\t\t') && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
         activeFence = fenceStart(value);
         fenceFirstContent = !!activeFence;
         const nestedFromValue = listStart(value);
