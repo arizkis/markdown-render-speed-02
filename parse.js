@@ -415,12 +415,12 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
       i++;
       while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFencedIndent(lines[i++], fence.indent, baseIndent));
       if (i < lines.length) i++;
-      if (content.length > 1 && content[content.length - 1] === '' && content[content.length - 2] === '') content.pop();
       const info = fence.info;
       let language = '';
       for (let n = 0; n < info.length && info[n] !== ' ' && info[n] !== '\t'; n++) language += info[n];
       const cls = language ? ` class="language-${escapeHtml(unescapePunctuation(language), false)}"` : '';
-      out.push(`<pre><code${cls}>${escapeHtml(content.join('\n') + (content.length ? '\n' : ''), true)}</code></pre>\n`);
+      const code = content.join('\n') + (content.length && content[content.length - 1] !== '' ? '\n' : '');
+      out.push(`<pre><code${cls}>${escapeHtml(code, true)}</code></pre>\n`);
       continue;
     }
     if (isIndentedCode(line)) {
