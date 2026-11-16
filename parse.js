@@ -1065,13 +1065,19 @@ function renderTable(lines, start, refs) {
   const out = ['<table>\n<thead>\n', tagRow(headers, 'th'), '</thead>\n'];
   let i = start + 2;
   const body = [];
-  while (i < lines.length && lines[i].length > 0 && (!startsBlock(lines, i) || lines[i].includes('|') || (i + 1 < lines.length && setextLevel(lines[i + 1])))) {
+  while (i < lines.length && tableBodyContinues(lines, i)) {
     body.push(tagRow(tableCells(lines[i]), 'td'));
     i++;
   }
   if (body.length) out.push('<tbody>' + body.join('') + '</tbody>');
   out.push('</table>\n');
   return { html: out.join(''), next: i };
+}
+
+function tableBodyContinues(lines, i) {
+  const line = lines[i];
+  if (isBlank(line)) return line.includes('\t');
+  return !startsBlock(lines, i) || line.includes('|') || (i + 1 < lines.length && setextLevel(lines[i + 1]));
 }
 
 function tableCells(line) {
