@@ -934,6 +934,7 @@ function isInlineHtml(inside) {
   i++;
   while (isAlpha(inside.charCodeAt(i)) || isDigit(inside.charCodeAt(i)) || inside[i] === '-') i++;
   if (closing) return i === inside.length;
+  if (i < inside.length && !isSpace(inside[i]) && inside[i] !== '/') return false;
   if (inside.includes('\n')) {
     let quoteCount = 0;
     for (let q = 0; q < inside.length; q++) if (inside[q] === '"' || inside[q] === "'") quoteCount++;
@@ -954,10 +955,12 @@ function isInlineHtml(inside) {
   while (i < inside.length) {
     const attrStart = i;
     while (i < inside.length && inside[i] !== ' ' && inside[i] !== '\t' && inside[i] !== '\n' && inside[i] !== '\r' && inside[i] !== '=') {
-      if (inside[i] === '<' || inside[i] === '>' || inside[i] === '`' || inside[i] === '*' || inside[i] === '#') return false;
+      const cp = inside.charCodeAt(i);
+      if (!isAlpha(cp) && !isDigit(cp) && inside[i] !== '_' && inside[i] !== ':' && inside[i] !== '.' && inside[i] !== '-') return false;
       i++;
     }
-    if (i === attrStart || i >= inside.length) return false;
+    if (i === attrStart) return false;
+    if (i >= inside.length) return true;
     const attrHasEquals = inside[i] === '=';
     if (!attrHasEquals && inside[i] !== ' ' && inside[i] !== '\t' && inside[i] !== '\n' && inside[i] !== '\r') return false;
     if (!attrHasEquals) {
