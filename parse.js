@@ -1092,6 +1092,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
   const out = [];
   const codeMask = inlineCodeMask(text);
   let i = 0;
+  let literalLabelEnd = -1;
   while (i < text.length) {
     const c = text[i];
     if (c === '\\' && i + 1 < text.length) {
@@ -1161,6 +1162,9 @@ function renderInline(text, refs, suppressBareUrls = false) {
     if (c === '[' || (c === '!' && text[i + 1] === '[')) {
       const parsed = parseLink(text, i, refs);
       if (parsed) { out.push(parsed.html); i = parsed.end; continue; }
+      const open = i + (c === '!' ? 1 : 0);
+      const close = findLabelClose(text, open);
+      if (close < text.length && hasTrailingTextAfterMixedCode(text.slice(open + 1, close))) literalLabelEnd = close;
       if (c === '[') {
         const shortcut = parseShortcutLink(text, i, refs);
         if (shortcut) { out.push(shortcut.html); i = shortcut.end; continue; }
@@ -1180,7 +1184,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         continue;
       }
     }
-    if ((c === '*' || c === '_') && !codeMask?.[i]) {
+    if ((c === '*' || c === '_') && !codeMask?.[i] && i > literalLabelEnd) {
       let n = 1; while (text[i + n] === c) n++;
       const canOpen = delimiterCanOpen(text, i, n, c);
       const match = canOpen ? findEmphasisSpan(text, i, n, c, refs) : null;
@@ -1471,6 +1475,7 @@ function parseLink(text, start, refs, probe = false) {
   const close = findLabelClose(text, open);
   if (close >= text.length) return null;
   const label = text.slice(open + 1, close);
+  if (hasTrailingTextAfterMixedCode(label)) return null;
   let end = close + 1;
   let href = ''; let title = '';
   if (text[end] === '(') {
@@ -1537,6 +1542,20 @@ function parseLink(text, start, refs, probe = false) {
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
   const content = image ? stripInlineTags(renderInline(label, refs, true)) : renderInline(label, refs, true);
   return { html: image ? `<img src="${safe}" alt="${escapeHtml(content, true)}"${titleAttr}>` : `<a href="${safe}"${titleAttr}>${content}</a>`, end };
+}
+
+function hasTrailingTextAfterMixedCode(label) {
+  for (let i = 0; i < label.length; i++) {
+    if (label[i] === '\\') { i++; continue; }
+    if (label[i] !== '`') continue;
+    const count = delimiterRunLength(label, i, '`');
+    const close = findCodeClosing(label, i + count, '`'.repeat(count));
+    if (close >= 0) {
+      if (count > 1 && label.indexOf('`', i + count) < close && trimAscii(label.slice(close + count))) return true;
+      i = close + count - 1;
+    } else i += count - 1;
+  }
+  return false;
 }
 
 function labelHasMarkdownLink(label, refs) {
