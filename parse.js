@@ -1581,79 +1581,92 @@ function isUnicodePunctuation(cp) {
     (cp >= 0x2000 && cp <= 0x206f) || (cp >= 0x20a0 && cp <= 0x20cf) || (cp >= 0x2100 && cp <= 0x214f) || (cp >= 0x2190 && cp <= 0x2bff) || (cp >= 0x2e00 && cp <= 0x2e7f) || (cp >= 0x3001 && cp <= 0x303f) || (cp >= 0xfe10 && cp <= 0xfe6f) || (cp >= 0xff01 && cp <= 0xff0f) || (cp >= 0xff1a && cp <= 0xff20) || (cp >= 0xff3b && cp <= 0xff40) || (cp >= 0xff5b && cp <= 0xff65) || (cp >= 0x1f000 && cp <= 0x1faff);
 }
 
-function parseLink(text, start, refs, probe = false) {
-  const image = text[start] === '!';
-  const open = start + (image ? 1 : 0);
-  const close = findLabelClose(text, open);
-  if (close >= text.length) return null;
-  const label = text.slice(open + 1, close);
-  if (hasTrailingTextAfterMixedCode(label)) return null;
-  let end = close + 1;
-  let href = ''; let title = '';
-  if (text[end] === '(') {
-    let p = end + 1; while (p < text.length && isSpace(text[p])) p++;
-    if (text[p] === '<') {
-      const begin = p + 1;
-      p = begin;
-      while (p < text.length && text[p] !== '\n' && text[p] !== '\r') {
-          if (text[p] === '\\' && p + 1 < text.length && PUNCT.includes(text[p + 1])) { p += 2; continue; }
-        if (text[p] === '>') break;
-        if (text[p] === '<') return null;
-        p++;
-      }
-      if (text[p] !== '>' || (p > begin && text[p - 1] === '\\')) return null;
-      href = unescapePunctuation(text.slice(begin, p)); p++;
-    } else {
-      let parens = 0; const begin = p;
-      while (p < text.length && !isSpace(text[p])) {
-        if (text[p] === '\\' && p + 1 < text.length && PUNCT.includes(text[p + 1])) { p += 2; continue; }
-        if (text[p] === '(') parens++;
-        else if (text[p] === ')') {
-          if (parens === 0) break;
-          parens--;
-        }
-        p++;
-      }
-      if (parens !== 0) return null;
-      href = unescapePunctuation(text.slice(begin, p));
+function inlineDestination(source, offset) {
+  let cursor = offset;
+  while (isSpace(source[cursor])) cursor++;
+  let address;
+  if (source.charCodeAt(cursor) === 60) {
+    const begin = ++cursor;
+    for (; cursor < source.length; cursor++) {
+      const code = source.charCodeAt(cursor);
+      if (code === 10 || code === 13 || code === 60) return null;
+      if (code === 92 && PUNCT.includes(source[cursor + 1])) { cursor++; continue; }
+      if (code === 62) break;
     }
-    while (p < text.length && isSpace(text[p])) p++;
-    if (text[p] === '"' || text[p] === "'") {
-      const q = findTitleEnd(text, p, text[p]);
-      if (q < 0) return null;
-      title = unescapePunctuation(text.slice(p + 1, q)); p = q + 1;
-      while (p < text.length && isSpace(text[p])) p++;
-    } else if (text[p] === '(') {
-      const q = findTitleEnd(text, p, ')');
-      if (q < 0) return null;
-      title = unescapePunctuation(text.slice(p + 1, q)); p = q + 1;
-      while (p < text.length && isSpace(text[p])) p++;
-    }
-    if (text[p] !== ')') return null;
-    end = p + 1;
+    if (source[cursor] !== '>' || (cursor > begin && source[cursor - 1] === '\\')) return null;
+    address = source.slice(begin, cursor++);
   } else {
-    let refLabel = label;
-    if (text[end] === '[') {
-      const q = text.indexOf(']', end + 1); if (q < 0) return null;
-      if (q > end + 1) refLabel = text.slice(end + 1, q);
-      end = q + 1;
+    const begin = cursor;
+    let nesting = 0;
+    for (; cursor < source.length && !isSpace(source[cursor]); cursor++) {
+      const code = source.charCodeAt(cursor);
+      if (code === 92 && PUNCT.includes(source[cursor + 1])) { cursor++; continue; }
+      if (code === 40) nesting++;
+      else if (code === 41) {
+        if (nesting === 0) break;
+        nesting--;
+      }
     }
-    const explicit = text[end - 1] === ']';
-    const ref = refs[normalizeLabel(refLabel)];
-    if (!ref && !explicit) {
-      const shortcut = refs[normalizeLabel(label)];
-      if (!shortcut) return null;
-      href = shortcut.url; title = shortcut.title;
-    } else if (ref) {
-      href = ref.url; title = ref.title;
-    } else return null;
+    if (nesting !== 0) return null;
+    address = source.slice(begin, cursor);
   }
-  if (!image && labelHasMarkdownLink(label, refs)) return null;
-  if (probe) return { end };
-  const safe = cleanUrl(href);
-  const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
-  const content = image ? stripInlineTags(renderInline(label, refs, true)) : renderInline(label, refs, true);
-  return { html: image ? `<img src="${safe}" alt="${escapeHtml(content, true)}"${titleAttr}>` : `<a href="${safe}"${titleAttr}>${content}</a>`, end };
+  while (isSpace(source[cursor])) cursor++;
+  let caption = '';
+  const delimiter = source[cursor];
+  if (delimiter === '"' || delimiter === "'" || delimiter === '(') {
+    const finish = findTitleEnd(source, cursor, delimiter === '(' ? ')' : delimiter);
+    if (finish < 0) return null;
+    caption = source.slice(cursor + 1, finish);
+    cursor = finish + 1;
+    while (isSpace(source[cursor])) cursor++;
+  }
+  if (source.charCodeAt(cursor) !== 41) return null;
+  return [unescapePunctuation(address), unescapePunctuation(caption), cursor + 1];
+}
+
+function referenceDestination(source, label, offset, references) {
+  let key = label;
+  let finish = offset;
+  if (source.charCodeAt(offset) === 91) {
+    const bracket = source.indexOf(']', offset + 1);
+    if (bracket === -1) return null;
+    if (bracket !== offset + 1) key = source.slice(offset + 1, bracket);
+    finish = bracket + 1;
+  }
+  const saved = references[normalizeLabel(key)];
+  return saved ? [saved.url, saved.title, finish] : null;
+}
+
+function parseLink(text, start, refs, probe = false) {
+  const isImage = text.charCodeAt(start) === 33;
+  const bracket = isImage ? start + 1 : start;
+  const labelEnd = findLabelClose(text, bracket);
+  if (labelEnd === text.length) return null;
+  const labelText = text.slice(bracket + 1, labelEnd);
+  if (hasTrailingTextAfterMixedCode(labelText)) return null;
+
+  const afterLabel = labelEnd + 1;
+  const destination = text.charCodeAt(afterLabel) === 40
+    ? inlineDestination(text, afterLabel + 1)
+    : referenceDestination(text, labelText, afterLabel, refs);
+  if (destination === null) return null;
+  if (!isImage && labelHasMarkdownLink(labelText, refs)) return null;
+  const nextPosition = destination[2];
+  if (probe) return { end: nextPosition };
+
+  const rendered = renderResolvedLink(labelText, destination[0], destination[1], isImage, refs);
+  return { end: nextPosition, html: rendered };
+}
+
+function renderResolvedLink(label, address, caption, isImage, references) {
+  const target = cleanUrl(address);
+  const captionAttribute = caption.length ? ' title="' + escapeHtml(caption) + '"' : '';
+  const contents = renderInline(label, references, true);
+  if (isImage) {
+    const alternative = escapeHtml(stripInlineTags(contents), true);
+    return '<img src="' + target + '" alt="' + alternative + '"' + captionAttribute + '>';
+  }
+  return '<a href="' + target + '"' + captionAttribute + '>' + contents + '</a>';
 }
 
 function hasTrailingTextAfterMixedCode(label) {
