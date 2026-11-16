@@ -1680,13 +1680,25 @@ function extendedUrlAt(text, i) {
   } else return null;
   let p = i + prefix.length;
   while (p < text.length && !isSpace(text[p]) && text[p] !== '<' && text[p] !== '>' && text[p] !== '"') p++;
+  const unclosed = [];
+  for (let q = i; q < p; q++) {
+    if (text[q] === '(') unclosed.push(q);
+    else if (text[q] === ')' && unclosed.length) unclosed.pop();
+  }
+  if (unclosed.length) p = unclosed[0];
   while (true) {
     const before = p;
     while (p > i && (text[p - 1] === '.' || text[p - 1] === ',' || text[p - 1] === ':' || text[p - 1] === ';' || text[p - 1] === '!' || text[p - 1] === '?')) p--;
     while (p > i && text[p - 1] === ')') {
-      let opens = 0, closes = 0;
-      for (let q = i; q < p; q++) { if (text[q] === '(') opens++; else if (text[q] === ')') closes++; }
-      if (closes <= opens) break;
+      let opens = 0, matched = false;
+      for (let q = i; q < p; q++) {
+        if (text[q] === '(') opens++;
+        else if (text[q] === ')') {
+          matched = opens > 0;
+          if (opens) opens--;
+        }
+      }
+      if (matched) break;
       p--;
     }
     if (p === before) break;
@@ -1708,7 +1720,11 @@ function scanUrlEnd(text, start) {
 
 function parseEmailAt(text, start, limit = text.length) {
   let p = start;
-  while (p < limit && !isSpace(text[p]) && text[p] !== '<' && text[p] !== '>') p++;
+  while (p < limit && (isAlpha(text.charCodeAt(p)) || isDigit(text.charCodeAt(p)) || "!#$%&'*+/=?^_`{|}~.-".includes(text[p]))) p++;
+  if (text[p] !== '@' || p >= limit) return null;
+  p++;
+  while (p < limit && (isAlpha(text.charCodeAt(p)) || isDigit(text.charCodeAt(p)) || text[p] === '-' || text[p] === '.')) p++;
+  if (text[p] === '_') return null;
   let end = p;
   while (end > start && '.,!?;:'.includes(text[end - 1])) end--;
   const value = text.slice(start, end);
