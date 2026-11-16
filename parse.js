@@ -1065,7 +1065,7 @@ function renderTable(lines, start, refs) {
   const out = ['<table>\n<thead>\n', tagRow(headers, 'th'), '</thead>\n'];
   let i = start + 2;
   const body = [];
-  while (i < lines.length && !isBlank(lines[i]) && !startsBlock(lines, i)) {
+  while (i < lines.length && lines[i].length > 0 && (!startsBlock(lines, i) || lines[i].includes('|') || (i + 1 < lines.length && setextLevel(lines[i + 1])))) {
     body.push(tagRow(tableCells(lines[i]), 'td'));
     i++;
   }
