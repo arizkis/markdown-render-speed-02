@@ -58,7 +58,7 @@ function indentColumns(line) {
   return n;
 }
 
-function stripIndent(line, count) {
+function stripIndent(line, count, retainTabs = false) {
   const requested = count;
   let i = 0;
   let column = 0;
@@ -73,7 +73,7 @@ function stripIndent(line, count) {
     else break;
   }
   let rest = line.slice(i);
-  if (requested > 0 && line[0] === '\t' && rest[0] === '\t') rest = '  ' + rest.slice(1);
+  if (!retainTabs && requested > 0 && line[0] === '\t' && rest[0] === '\t') rest = '  ' + rest.slice(1);
   return prefix + rest;
 }
 
@@ -382,7 +382,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       while (i < lines.length) {
         if (isBlank(lines[i])) { content.push(stripIndent(lines[i], 4)); i++; continue; }
         if (!isIndentedCode(lines[i])) break;
-        content.push(stripIndent(lines[i], 4)); i++;
+        content.push(stripIndent(lines[i], 4, !baseIndent)); i++;
       }
       while (content.length && content[content.length - 1] === '') content.pop();
       out.push(`<pre><code>${escapeHtml(content.join('\n') + '\n', true)}</code></pre>\n`);
