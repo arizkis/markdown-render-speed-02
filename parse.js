@@ -1142,6 +1142,7 @@ function findStrikeClose(text, start, refs) {
 
 function renderInline(text, refs, suppressBareUrls = false) {
   const out = [];
+  const codeMask = inlineCodeMask(text);
   let i = 0;
   while (i < text.length) {
     const c = text[i];
@@ -1228,7 +1229,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         continue;
       }
     }
-    if (c === '*' || c === '_') {
+    if ((c === '*' || c === '_') && !codeMask?.[i]) {
       let n = 1; while (text[i + n] === c) n++;
       const matches = delimiterCanOpen(text, i, n, c) ? findDelimiterGroups(text, i + n, c, n, refs) : null;
       if (matches) {
@@ -1250,6 +1251,21 @@ function renderInline(text, refs, suppressBareUrls = false) {
     out.push(escapeHtml(c)); i++;
   }
   return out.join('');
+}
+
+function inlineCodeMask(text) {
+  let mask = null;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') { i++; continue; }
+    if (text[i] !== '`') continue;
+    const count = delimiterRunLength(text, i, '`');
+    const close = findCodeClosing(text, i + count, '`'.repeat(count));
+    if (close < 0) { i += count - 1; continue; }
+    if (!mask) mask = new Uint8Array(text.length);
+    mask.fill(1, i, close + count);
+    i = close + count - 1;
+  }
+  return mask;
 }
 
 function parseShortcutLink(text, start, refs) {
