@@ -705,7 +705,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
       const next = activeFence ? null : listStart(lines[i]);
       if (!activeFence && lines[i][0] === '\t' && listStart(lines[i].trimStart())) {
         item.hasNestedMarker = true;
-        item.push(`  ${lines[i].trimStart()}`);
+        item.push(stripIndent(lines[i], item.contentIndent));
         i++;
         continue;
       }
