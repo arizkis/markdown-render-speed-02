@@ -75,6 +75,36 @@ function stripIndent(line, count) {
   return prefix + rest;
 }
 
+function stripFencedIndent(line, count, baseIndent) {
+  if (!baseIndent) return stripIndent(line, count);
+  let i = 0;
+  let column = baseIndent;
+  let remaining = count;
+  let prefix = '';
+  while (i < line.length && remaining > 0) {
+    if (line[i] === ' ') { remaining--; column++; i++; }
+    else if (line[i] === '\t') {
+      const width = 4 - (column % 4);
+      if (remaining >= width) { remaining -= width; column += width; i++; }
+      else { prefix += ' '.repeat(width - remaining); remaining = 0; column += width; i++; }
+    } else break;
+  }
+  let end = i;
+  let leading = '';
+  while (end < line.length && (line[end] === ' ' || line[end] === '\t')) {
+    if (line[end] === '\t') {
+      const width = 4 - (column % 4);
+      leading += ' '.repeat(width);
+      column += width;
+    } else {
+      leading += ' ';
+      column++;
+    }
+    end++;
+  }
+  return prefix + leading + line.slice(end);
+}
+
 function splitLines(markdown) {
   const source = String(markdown);
   const lines = [];
@@ -335,7 +365,7 @@ function unescapePunctuation(text) {
   return out;
 }
 
-function renderBlocks(lines, refs, inListItem = false) {
+function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -344,7 +374,7 @@ function renderBlocks(lines, refs, inListItem = false) {
     if (isThematic(line)) { out.push('<hr>\n'); i++; continue; }
     const list = listStart(line);
     if (list) {
-      const result = renderList(lines, i, refs, list);
+      const result = renderList(lines, i, refs, list, baseIndent);
       out.push(result.html); i = result.next; continue;
     }
     if (i + 1 < lines.length && isTableDelimiter(lines[i + 1])) {
@@ -383,7 +413,7 @@ function renderBlocks(lines, refs, inListItem = false) {
     if (fence) {
       const content = [];
       i++;
-      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripIndent(lines[i++], fence.indent));
+      while (i < lines.length && !fenceEnd(lines[i], fence)) content.push(stripFencedIndent(lines[i++], fence.indent, baseIndent));
       if (i < lines.length) i++;
       if (content.length > 1 && content[content.length - 1] === '' && content[content.length - 2] === '') content.pop();
       const info = fence.info;
@@ -440,7 +470,7 @@ function renderBlocks(lines, refs, inListItem = false) {
       if (quote.length > 1 && isBlank(quote[quote.length - 1]) && quote[quote.length - 1].length > 0) {
         quote[quote.length - 2] += `\n${quote.pop()}`;
       }
-      let quoteHtml = renderBlocks(quote, refs, inListItem);
+      let quoteHtml = renderBlocks(quote, refs, inListItem, quotePrefixWidth(line));
       if (quote.length && isHtmlBlockStart(quote[0]) && !quote.some(isBlank) && quoteHtml.endsWith('\n')) quoteHtml = quoteHtml.slice(0, -1);
       out.push(`<blockquote>\n${quoteHtml}</blockquote>\n`);
       continue;
@@ -480,6 +510,13 @@ function quoteLine(line) {
   let content = line.slice(i + 1);
   if (content[0] === ' ') content = content.slice(1);
   return content;
+}
+
+function quotePrefixWidth(line) {
+  let i = 0;
+  while (i < line.length && i < 3 && line[i] === ' ') i++;
+  if (line[i] !== '>') return 0;
+  return i + 1 + (line[i + 1] === ' ' ? 1 : 0);
 }
 
 function startsBlock(lines, i) {
@@ -597,7 +634,7 @@ function listIndentCompatible(first, marker) {
   return marker.indent >= first.indent || (first.indent <= 3 && marker.indent <= 3);
 }
 
-function renderList(lines, start, refs, first) {
+function renderList(lines, start, refs, first, baseIndent = 0) {
   const items = [];
   let i = start;
   let loose = false;
@@ -622,6 +659,7 @@ function renderList(lines, start, refs, first) {
     if (items.length && marker.indent > first.indent && marker.indent >= items[items.length - 1].contentIndent) break;
     const item = [lines[i].slice(marker.width)];
     item.contentIndent = marker.contentIndent;
+    item.baseIndent = baseIndent + marker.contentIndent;
     item.nestedContentIndent = marker.contentIndent;
     item.hasNestedMarker = false;
     items.push(item);
@@ -672,14 +710,14 @@ function renderList(lines, start, refs, first) {
         break;
       }
       if (i < lines.length && isThematic(lines[i]) && indentColumns(lines[i]) < item.contentIndent) break;
-      const next = listStart(lines[i]);
-      if (lines[i][0] === '\t' && listStart(lines[i].trimStart())) {
+      const next = activeFence ? null : listStart(lines[i]);
+      if (!activeFence && lines[i][0] === '\t' && listStart(lines[i].trimStart())) {
         item.hasNestedMarker = true;
         item.push(`  ${lines[i].trimStart()}`);
         i++;
         continue;
       }
-      if (next && next.ordered === first.ordered && next.delimiter === first.delimiter && listIndentCompatible(first, next) && next.indent < item.contentIndent) break;
+      if (!activeFence && next && next.ordered === first.ordered && next.delimiter === first.delimiter && listIndentCompatible(first, next) && next.indent < item.contentIndent) break;
       const nestedMarker = next && next.indent >= item.contentIndent;
       if (nestedMarker && first.indent === 3 && next.indent === item.contentIndent) {
         item.push(lines[i].trimStart());
@@ -690,17 +728,19 @@ function renderList(lines, start, refs, first) {
         if (!item.hasNestedMarker) item.nestedContentIndent = next.contentIndent;
         item.hasNestedMarker = true;
       }
-      if (activeFence) {
-        if (fenceEnd(lines[i], activeFence)) activeFence = null;
-      } else {
-        activeFence = fenceStart(lines[i]);
-      }
       if (indentColumns(lines[i]) >= item.contentIndent) {
-        let value = stripIndent(lines[i], item.contentIndent);
-        if (value[0] === '\t') value = ' ' + value.slice(1);
-        if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
+        let value;
+        if (activeFence) {
+          value = stripFencedIndent(lines[i], item.contentIndent, baseIndent);
+          if (fenceEnd(value, activeFence)) activeFence = null;
+        } else {
+          value = stripIndent(lines[i], item.contentIndent);
+          if (value[0] === '\t') value = ' ' + value.slice(1);
+          if (lines[i][0] === '\t' && item.contentIndent < 4) value = `      ${lines[i].trimStart()}`;
+          activeFence = fenceStart(value);
+        }
         const nestedFromValue = listStart(value);
-        if (nestedFromValue && !item.hasNestedMarker) {
+        if (!activeFence && nestedFromValue && !item.hasNestedMarker) {
           item.hasNestedMarker = true;
           item.nestedContentIndent = item.contentIndent + nestedFromValue.contentIndent;
         }
@@ -724,8 +764,8 @@ function renderList(lines, start, refs, first) {
       task = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox"> `;
       item[0] = item[0].slice(4);
     }
-    const inner = renderBlocks(item, refs, true);
-    let body = (loose ? inner : tightListItem(item, refs));
+    const inner = renderBlocks(item, refs, true, item.baseIndent);
+    let body = (loose ? inner : tightListItem(item, refs, item.baseIndent));
     if (!loose && item.length === 1 && isHtmlBlockStart(item[0]) && body.endsWith('\n')) body = body.slice(0, -1);
     const taskBody = task ? (loose ? body.replace('<p>', `<p>${task}`) : task + body) : body;
     out.push(`<li>${taskBody}</li>\n`);
@@ -734,7 +774,7 @@ function renderList(lines, start, refs, first) {
   return { html: out.join(''), next: i };
 }
 
-function tightListItem(lines, refs) {
+function tightListItem(lines, refs, baseIndent) {
   if (!lines.length) return '';
   const out = [];
   let i = 0;
@@ -747,7 +787,7 @@ function tightListItem(lines, refs) {
       continue;
     }
     if (startsBlock(lines, i) && !(i + 1 < lines.length && setextLevel(lines[i + 1]))) {
-      out.push(renderBlocks(lines.slice(i), refs, true)); break;
+      out.push(renderBlocks(lines.slice(i), refs, true, baseIndent)); break;
     }
     const p = [lines[i++]];
     let level = 0;
