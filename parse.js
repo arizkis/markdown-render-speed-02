@@ -448,7 +448,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0) {
         const marked = quoteLine(lines[i]);
         if (marked !== null) {
           quote.push(marked);
-          if (isBlank(marked)) quoteBlankSeen = true;
+          quoteBlankSeen = isBlank(marked);
           if (quoteFence) {
             if (fenceEnd(marked, quoteFence)) quoteFence = null;
           } else quoteFence = fenceStart(marked);
