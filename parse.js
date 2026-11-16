@@ -1373,11 +1373,10 @@ function renderInline(source, references, suppressBareUrls = false) {
     const code = source.charCodeAt(cursor);
     if (!INLINE_SPECIAL[code]) {
       const allowBare = !suppressBareUrls && !references[IN_RAW_LINK];
-      const possibleUrl = (code | 32) === 104 || code === 119 || (cursor < lastAt && isAlpha(code));
-      if (allowBare && possibleUrl && (cursor === 0 || !isWord(source[cursor - 1]))) {
-        const link = bareLinkAt(source, cursor, cursor < lastAt);
+      if (allowBare && extendedLinkCandidate(source, cursor, lastAt)) {
+        const link = renderExtendedLink(source, cursor, cursor < lastAt);
         if (link) {
-          fragments.push('<a href="' + cleanUrl(link.href) + '">' + escapeHtml(link.label) + '</a>');
+          fragments.push(link.html);
           cursor = link.end;
           continue;
         }
@@ -1386,8 +1385,7 @@ function renderInline(source, references, suppressBareUrls = false) {
       while (cursor < source.length) {
         const nextCode = source.charCodeAt(cursor);
         if (INLINE_SPECIAL[nextCode]) break;
-        const couldStartLink = cursor < lastAt || (nextCode | 32) === 104 || nextCode === 119;
-        if (allowBare && couldStartLink && isAlpha(nextCode) && !isWord(source[cursor - 1])) break;
+        if (allowBare && extendedLinkCandidate(source, cursor, lastAt)) break;
         cursor++;
       }
       fragments.push(source.slice(begin, cursor));
@@ -2095,112 +2093,119 @@ function linkTitleLimit(source, start, delimiter) {
   return -1;
 }
 
-function bareLinkAt(text, i, emailPossible = true) {
-  if (i && isWord(text[i - 1])) return null;
-  let start = i;
-  let prefix = '';
-  let schemeEnd = i;
-  const initial = text.charCodeAt(i) | 32;
-  if (emailPossible && (initial === 109 || initial === 120)) {
-    while (isAlpha(text.charCodeAt(schemeEnd)) || isDigit(text.charCodeAt(schemeEnd)) || text[schemeEnd] === '+' || text[schemeEnd] === '-' || text[schemeEnd] === '.') schemeEnd++;
-    if (text[schemeEnd] === ':' && schemeEnd - i >= 2 && (text.slice(i, schemeEnd).toLowerCase() === 'mailto' || text.slice(i, schemeEnd).toLowerCase() === 'xmpp')) {
-      const scheme = text.slice(i, schemeEnd).toLowerCase();
-      const wholeEnd = scanUrlEnd(text, schemeEnd + 1);
-      const slash = text.indexOf('/', schemeEnd + 1);
-      const baseEnd = slash >= 0 && slash < wholeEnd ? slash : wholeEnd;
-      const email = parseEmailAt(text, schemeEnd + 1, baseEnd);
-      if (email) {
-        let end = email.end;
-        if (scheme === 'xmpp' && end < wholeEnd && text[end] === '/') {
-          end++;
-          while (end < wholeEnd && text[end] !== '/') end++;
-          while (end > email.end + 1 && (text[end - 1] === '.' || text[end - 1] === ',')) end--;
-        }
-        return { href: text.slice(i, end), label: text.slice(i, end), end };
-      }
-    }
-  }
-  if (initial === 104 && text.slice(i, i + 8).toLowerCase() === 'https://') prefix = text.slice(i, i + 8);
-  else if (initial === 104 && text.slice(i, i + 7).toLowerCase() === 'http://') prefix = text.slice(i, i + 7);
-  else if (initial === 119 && text.startsWith('www.', i)) prefix = 'www.';
-  else if (emailPossible && isAlpha(text.charCodeAt(i))) {
-    const email = parseEmailAt(text, i);
-    if (!email) return null;
-    return { href: `mailto:${email.value}`, label: email.value, end: email.end };
-  } else return null;
-  let p = i + prefix.length;
-  while (p < text.length && !isSpace(text[p]) && text[p] !== '<' && text[p] !== '>' && text[p] !== '"') p++;
-  const unclosed = [];
-  for (let q = i; q < p; q++) {
-    if (text[q] === '(') unclosed.push(q);
-    else if (text[q] === ')' && unclosed.length) unclosed.pop();
-  }
-  if (unclosed.length) p = unclosed[0];
-  while (true) {
-    const before = p;
-    while (p > i && (text[p - 1] === '.' || text[p - 1] === ',' || text[p - 1] === ':' || text[p - 1] === ';' || text[p - 1] === '!' || text[p - 1] === '?')) p--;
-    while (p > i && text[p - 1] === ')') {
-      let opens = 0, matched = false;
-      for (let q = i; q < p; q++) {
-        if (text[q] === '(') opens++;
-        else if (text[q] === ')') {
-          matched = opens > 0;
-          if (opens) opens--;
-        }
-      }
-      if (matched) break;
-      p--;
-    }
-    if (p === before) break;
-  }
-  const amp = text.lastIndexOf('&', p - 1);
-  if (amp >= i && text.slice(amp + 1, p).indexOf('=') < 0) p = amp;
-  if (p <= start + prefix.length) return null;
-  const label = text.slice(start, p);
-  if (prefix === 'www.') return { href: `http://${label}`, label, end: p };
-  return { href: label, label, end: p };
+function extendedLinkCandidate(source, offset, finalAt) {
+  const letter = source.charCodeAt(offset);
+  if ((letter | 32) !== 104 && letter !== 119 && !(offset < finalAt && isAlpha(letter))) return false;
+  const preceding = source.charCodeAt(offset - 1);
+  return preceding !== 95 && !isAlpha(preceding) && !isDigit(preceding);
 }
 
-function scanUrlEnd(text, start) {
-  let p = start;
-  while (p < text.length && !isSpace(text[p]) && text[p] !== '<' && text[p] !== '>') p++;
-  while (p > start && '.,!?;:'.includes(text[p - 1])) p--;
-  return p;
+function extendedAnchor(source, begin, end, targetPrefix = '') {
+  const label = source.slice(begin, end);
+  return {
+    end,
+    html: '<a href="' + cleanUrl(targetPrefix + label) + '">' + escapeHtml(label) + '</a>'
+  };
 }
 
-function parseEmailAt(text, start, limit = text.length) {
-  let cursor = start;
-  let previousDot = false;
-  while (cursor < limit) {
-    const character = text.charCodeAt(cursor);
-    if (!isAlpha(character) && !isDigit(character) && !EMAIL_LOCAL[character]) break;
-    const dot = character === 46;
-    if (dot && (cursor === start || previousDot)) return null;
-    previousDot = dot;
-    cursor++;
+function renderExtendedLink(source, begin, withMailbox) {
+  const remaining = source.slice(begin);
+  const mailScheme = withMailbox ? /^(mailto|xmpp):/i.exec(remaining) : null;
+  if (mailScheme !== null) {
+    const accountStart = begin + mailScheme[0].length;
+    const ceiling = mailAddressCeiling(source, accountStart);
+    const firstSlash = source.indexOf('/', accountStart);
+    const accountLimit = firstSlash === -1 ? ceiling : Math.min(firstSlash, ceiling);
+    const accountEnd = mailboxBoundary(source, accountStart, accountLimit);
+    if (accountEnd >= 0) {
+      let end = accountEnd;
+      if (mailScheme[1].toLowerCase() === 'xmpp' && end < ceiling && source[end] === '/') {
+        const nextSlash = source.indexOf('/', end + 1);
+        const resourceLimit = nextSlash === -1 ? ceiling : Math.min(nextSlash, ceiling);
+        const resource = source.slice(end + 1, resourceLimit).replace(/[.,]+$/, '');
+        end += resource.length + 1;
+      }
+      return extendedAnchor(source, begin, end);
+    }
   }
-  if (cursor === start || cursor >= limit || text.charCodeAt(cursor) !== 64 || previousDot) return null;
-  const domainStart = ++cursor;
-  for (; cursor < limit; cursor++) {
-    const character = text.charCodeAt(cursor);
-    if (!isAlpha(character) && !isDigit(character) && character !== 45 && character !== 46) break;
-  }
-  if (text.charCodeAt(cursor) === 95) return null;
-  let finish = cursor;
-  while (finish > domainStart && text.charCodeAt(finish - 1) === 46) finish--;
-  if (finish === domainStart) return null;
 
-  let labelStart = domainStart;
-  let separators = 0;
-  for (let position = domainStart; position <= finish; position++) {
-    if (position !== finish && text.charCodeAt(position) !== 46) continue;
-    if (position === labelStart) return null;
-    if (text.charCodeAt(labelStart) === 45 || text.charCodeAt(position - 1) === 45) return null;
-    if (position < finish) separators++;
-    labelStart = position + 1;
+  const protocol = /^https?:\/\//i.exec(remaining);
+  const prefix = protocol?.[0] ?? (remaining.startsWith('www.') ? 'www.' : '');
+  if (prefix.length > 0) {
+    const end = webAddressBoundary(source, begin, begin + prefix.length);
+    return end > begin + prefix.length
+      ? extendedAnchor(source, begin, end, prefix === 'www.' ? 'http://' : '') : null;
   }
-  if (separators === 0) return null;
-  return { value: text.slice(start, finish), end: finish };
+  if (!withMailbox || !isAlpha(source.charCodeAt(begin))) return null;
+  const end = mailboxBoundary(source, begin);
+  return end < 0 ? null : extendedAnchor(source, begin, end, 'mailto:');
+}
+
+function addressSeparator(code, quoted) {
+  return code === 9 || code === 10 || code === 13 || code === 32
+    || code === 60 || code === 62 || (quoted && code === 34);
+}
+
+function mailAddressCeiling(source, from) {
+  let width = 0;
+  while (from + width < source.length && !addressSeparator(source.charCodeAt(from + width), false)) width++;
+  const body = source.slice(from, from + width).replace(/[!?,.;:]+$/, '');
+  return from + body.length;
+}
+
+function webAddressBoundary(source, from, bodyStart) {
+  let stop = bodyStart;
+  let nesting = 0;
+  let openGroup = -1;
+  for (; stop < source.length && !addressSeparator(source.charCodeAt(stop), true); stop++) {
+    if (source[stop] === '(') {
+      if (nesting === 0) openGroup = stop;
+      nesting++;
+    } else if (source[stop] === ')' && nesting > 0) nesting--;
+  }
+  if (nesting > 0) stop = openGroup;
+
+  // Only balanced closing parentheses can keep a punctuation suffix in a URL.
+  let retained = from;
+  let balance = 0;
+  for (let offset = from; offset < stop; offset++) {
+    const character = source[offset];
+    if (character === ')') {
+      if (balance === 0) continue;
+      balance--;
+    } else if (character === '(') balance++;
+    else if ('!?,.;:'.includes(character)) continue;
+    retained = offset + 1;
+  }
+
+  const ampersand = source.lastIndexOf('&', retained - 1);
+  if (ampersand >= from) {
+    const assignment = source.indexOf('=', ampersand + 1);
+    if (assignment === -1 || assignment >= retained) retained = ampersand;
+  }
+  return retained;
+}
+
+function mailboxBoundary(source, from, ceiling = source.length) {
+  const candidate = source.slice(from, ceiling);
+  const separator = candidate.indexOf('@');
+  if (separator <= 0) return -1;
+  const account = candidate.slice(0, separator);
+  if (/[^a-z\d!#$%&'*+/=?^_`{|}~.\-]/i.test(account)
+    || account[0] === '.' || account.endsWith('.') || account.includes('..')) return -1;
+
+  const hostMatch = /^[a-z\d.\-]+/i.exec(candidate.slice(separator + 1));
+  if (hostMatch === null) return -1;
+  const host = hostMatch[0];
+  const hostOffset = from + separator + 1;
+  if (source[hostOffset + host.length] === '_') return -1;
+  const addressHost = host.replace(/\.+$/, '');
+  const labels = addressHost.split('.');
+  if (labels.length < 2) return -1;
+  for (const label of labels) {
+    if (label.length === 0 || label.startsWith('-') || label.endsWith('-')) return -1;
+  }
+  return hostOffset + addressHost.length;
 }
 
 function isSpace(character) {
@@ -2221,13 +2226,6 @@ function isAlpha(code) {
 function isHex(code) {
   if (isDigit(code)) return true;
   return (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
-}
-
-function isWord(character) {
-  if (!character) return false;
-  if (character === '_') return true;
-  const code = character.charCodeAt(0);
-  return isDigit(code) || isAlpha(code);
 }
 
 export {

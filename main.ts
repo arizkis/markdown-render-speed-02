@@ -1,15 +1,23 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parse } from './parse.js';
 
-const inputRoot = process.env.MAKEFUN_INPUT_DIR || '/input';
-const outputRoot = process.env.MAKEFUN_OUTPUT_DIR || '/output';
-const inputFile = process.env.INPUT_CASES || process.argv[2] || path.join(inputRoot, 'cases.json');
-const outputFile = process.env.OUTPUT_HTML || process.argv[3] || path.join(outputRoot, 'html.json');
+const [inputArgument, outputArgument] = process.argv.slice(2);
+const inputFile = process.env.INPUT_CASES || inputArgument
+  || join(process.env.MAKEFUN_INPUT_DIR || '/input', 'cases.json');
+const outputFile = process.env.OUTPUT_HTML || outputArgument
+  || join(process.env.MAKEFUN_OUTPUT_DIR || '/output', 'html.json');
 
-const payload = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-const cases = Array.isArray(payload) ? payload : Object.values(payload.cases ?? payload);
-const html = cases.map(item => parse(typeof item === 'string' ? item : item?.markdown ?? ''));
+const decoded = JSON.parse(readFileSync(inputFile, 'utf8'));
+let entries = decoded;
+if (!Array.isArray(entries)) entries = Object.values(entries.cases ?? entries);
 
-fs.mkdirSync(path.dirname(outputFile), { recursive: true });
-fs.writeFileSync(outputFile, JSON.stringify(html));
+const rendered = [];
+for (const entry of entries) {
+  const markdown = typeof entry === 'string' ? entry : (entry?.markdown ?? '');
+  rendered.push(parse(markdown));
+}
+
+const serialized = JSON.stringify(rendered);
+mkdirSync(dirname(outputFile), { recursive: true });
+writeFileSync(outputFile, serialized);
