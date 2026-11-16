@@ -1182,22 +1182,18 @@ function renderInline(text, refs, suppressBareUrls = false) {
     }
     if ((c === '*' || c === '_') && !codeMask?.[i]) {
       let n = 1; while (text[i + n] === c) n++;
-      const matches = delimiterCanOpen(text, i, n, c) ? findDelimiterGroups(text, i + n, c, n, refs) : null;
-      if (matches) {
-        let used = 0;
-        for (const match of matches) used += match.count;
-        out.push(escapeHtml(c.repeat(n - used)));
-        for (let j = matches.length - 1; j >= 0; j--) out.push(openEmphasis(matches[j].count));
-        let cursor = i + n;
-        for (const match of matches) {
-          out.push(renderInline(text.slice(cursor, match.at), refs, suppressBareUrls));
-          out.push(closeEmphasis(match.count));
-          cursor = match.at + match.count;
-        }
-        i = cursor;
+      const canOpen = delimiterCanOpen(text, i, n, c);
+      const match = canOpen ? findEmphasisSpan(text, i, n, c, refs) : null;
+      if (match) {
+        const prefix = match.prefix || 0;
+        const used = Math.min(n - prefix, match.count) % 2 ? 1 : 2;
+        const end = match.at + match.count;
+        const tag = used === 1 ? 'em' : 'strong';
+        out.push(c.repeat(prefix), `<${tag}>${renderInline(text.slice(i + prefix + used, end - used), refs, suppressBareUrls)}</${tag}>`);
+        i = end;
         continue;
       }
-      if (n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
+      if (!canOpen && n > 1) { out.push(escapeHtml(c.repeat(n))); i += n; continue; }
     }
     out.push(escapeHtml(c)); i++;
   }
@@ -1323,6 +1319,51 @@ function delimiterInfo(text, at, count, marker) {
 }
 
 function delimiterCanOpen(text, at, count, marker) { return delimiterInfo(text, at, count, marker).open; }
+
+function findEmphasisSpan(text, start, opening, marker, refs) {
+  const left = delimiterInfo(text, start, opening, marker);
+  let balance = opening;
+  let ambiguous = 0;
+  for (let p = start + opening; p < text.length;) {
+    const ch = text[p];
+    if (ch === '\\') { p += 2; continue; }
+    if (ch === '`') {
+      const run = delimiterRunLength(text, p, '`');
+      const close = findCodeClosing(text, p + run, '`'.repeat(run));
+      p = close < 0 ? p + run : close + run;
+      continue;
+    }
+    if (ch === '<') {
+      const end = inlineTagEnd(text, p);
+      if (end >= 0) { p = end + 1; continue; }
+    }
+    if (ch === '[' || (ch === '!' && text[p + 1] === '[')) {
+      const link = parseLink(text, p, refs, true);
+      if (link) { p = link.end; continue; }
+    }
+    if (ch !== marker) { p++; continue; }
+    const count = delimiterRunLength(text, p, marker);
+    const info = delimiterInfo(text, p, count, marker);
+    if (info.close) {
+      if ((left.close || info.open) && (opening + count) % 3 === 0 && (opening % 3 !== 0 || count % 3 !== 0)) ambiguous += count;
+      else {
+        balance -= count;
+        if (balance <= 0) return { at: p, count: Math.min(count, count + balance + ambiguous) };
+      }
+    } else if (info.open) balance += count;
+    p += count;
+  }
+  if (!ambiguous) {
+    const fallback = findDelimiterGroups(text, start + opening, marker, opening, refs);
+    if (fallback) {
+      let used = 0;
+      for (const match of fallback) used += match.count;
+      const last = fallback[fallback.length - 1];
+      return { at: last.at, count: last.count, prefix: opening - used };
+    }
+  }
+  return null;
+}
 
 function findDelimiter(text, from, marker, openerCount) {
   const matches = scanDelimiters(text, from, marker, openerCount, true, false);
