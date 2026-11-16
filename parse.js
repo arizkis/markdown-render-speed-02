@@ -1182,12 +1182,12 @@ function renderInline(text, refs, suppressBareUrls = false) {
     if (url) { out.push(`<a href="${cleanUrl(url.href)}">${escapeHtml(url.label)}</a>`); i = url.end; continue; }
     if (c === '~' && text[i + 1] === '~' && text[i - 1] !== '~' && text[i + 2] !== '~' && !isSpace(text[i + 2])) {
       const end = findStrikeClose(text, i, refs);
-      if (end > i + 2 && !isSpace(text[end - 1])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs)}</del>`); i = end + 2; continue; }
+      if (end > i + 2 && !isSpace(text[end - 1])) { out.push(`<del>${renderInline(text.slice(i + 2, end), refs, suppressBareUrls)}</del>`); i = end + 2; continue; }
     }
     if (c === '~' && text[i + 1] !== '~' && text[i - 1] !== '~' && !isSpace(text[i + 1])) {
       const end = text.indexOf('~', i + 1);
       if (end > i + 1 && text[end - 1] !== '~' && !isSpace(text[end - 1])) {
-        out.push(`<del>${renderInline(text.slice(i + 1, end), refs)}</del>`);
+        out.push(`<del>${renderInline(text.slice(i + 1, end), refs, suppressBareUrls)}</del>`);
         i = end + 1;
         continue;
       }
@@ -1202,7 +1202,7 @@ function renderInline(text, refs, suppressBareUrls = false) {
         for (let j = matches.length - 1; j >= 0; j--) out.push(openEmphasis(matches[j].count));
         let cursor = i + n;
         for (const match of matches) {
-          out.push(renderInline(text.slice(cursor, match.at), refs));
+          out.push(renderInline(text.slice(cursor, match.at), refs, suppressBareUrls));
           out.push(closeEmphasis(match.count));
           cursor = match.at + match.count;
         }
@@ -1222,7 +1222,7 @@ function parseShortcutLink(text, start, refs) {
   const label = text.slice(start + 1, close);
   const ref = refs[normalizeLabel(label)];
   if (!ref) return null;
-  return { html: `<a href="${cleanUrl(ref.url)}"${ref.title ? ` title="${escapeHtml(ref.title)}"` : ''}>${renderInline(label, refs)}</a>`, end: close + 1 };
+  return { html: `<a href="${cleanUrl(ref.url)}"${ref.title ? ` title="${escapeHtml(ref.title)}"` : ''}>${renderInline(label, refs, true)}</a>`, end: close + 1 };
 }
 
 function entityAt(text, i) {
