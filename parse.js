@@ -328,12 +328,14 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
   while (i < lines.length) {
     if (isBlank(lines[i])) { i++; continue; }
     const line = lines[i];
-    if (indentColumns(line) < 4 && line[leadingSpaces(line)] === '[') {
-      const definition = parseReferenceDefinition(lines, i, leadingSpaces(line));
+    const leading = leadingSpaces(line);
+    const initial = line.charCodeAt(leading);
+    if (initial === 91 && indentColumns(line) < 4) {
+      const definition = parseReferenceDefinition(lines, i, leading);
       if (definition && saveReference(refs, definition)) { i = definition.next; continue; }
     }
-    if (isThematic(line)) { if (!collecting) out.push('<hr>\n'); i++; continue; }
-    const list = listStart(line);
+    if ((initial === 42 || initial === 45 || initial === 95) && isThematic(line)) { if (!collecting) out.push('<hr>\n'); i++; continue; }
+    const list = initial === 42 || initial === 45 || initial === 43 || isDigit(initial) ? listStart(line) : null;
     if (list) {
       const result = renderList(lines, i, refs, list, baseIndent);
       out.push(result.html); i = result.next; continue;
@@ -342,7 +344,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       const table = renderTable(lines, i, refs);
       if (table) { out.push(table.html); i = table.next; continue; }
     }
-    if (isHtmlBlockStart(line)) {
+    if (initial === 60 && isHtmlBlockStart(line)) {
       const block = collecting ? null : [line];
       const tag = htmlBlockTag(line);
       const rawTag = tag === '!--' || tag === '?' || tag === '![CDATA[' || tag === 'script' || tag === 'style' || tag === 'pre' || tag === 'textarea';
@@ -374,7 +376,7 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       if (block) out.push(block.join('\n') + (joinNewline ? '\n' : ''));
       continue;
     }
-    const fence = fenceStart(line);
+    const fence = initial === 96 || initial === 126 ? fenceStart(line) : null;
     if (fence) {
       if (collecting) {
         i++;
@@ -410,13 +412,13 @@ function renderBlocks(lines, refs, inListItem = false, baseIndent = 0, tight = f
       out.push(`<pre><code>${escapeHtml(content.join('\n') + '\n', true)}</code></pre>\n`);
       continue;
     }
-    const heading = atxHeading(line);
+    const heading = initial === 35 ? atxHeading(line) : null;
     if (heading) { if (!collecting) out.push(`<h${heading.level}>${renderInline(heading.text, refs)}</h${heading.level}>\n`); i++; continue; }
-    if (i + 1 < lines.length && !isBlank(line) && quoteLine(line) === null && !listStart(line) && !fenceStart(line)) {
+    if (i + 1 < lines.length && initial !== 62) {
       const level = setextLevel(lines[i + 1]);
       if (level) { if (!collecting) out.push(`<h${level}>${renderInline(trimAscii(line), refs)}</h${level}>\n`); i += 2; continue; }
     }
-    if (quoteLine(line) !== null) {
+    if (initial === 62 && quoteLine(line) !== null) {
       const quote = [];
       let quoteFence = null;
       let quoteBlankSeen = false;
@@ -521,13 +523,24 @@ function expandQuoteTabs(text, column) {
 
 function startsBlock(lines, i) {
   const line = lines[i];
-  return atxHeading(line) || fenceStart(line) || isThematic(line) || quoteLine(line) !== null || listStart(line) || isIndentedCode(line) || isHtmlBlockStart(line) || (i + 1 < lines.length && setextLevel(lines[i + 1]));
+  const indent = leadingSpaces(line);
+  if (indentColumns(line) >= 4) return true;
+  const c = line.charCodeAt(indent);
+  if (c === 35 && atxHeading(line)) return true;
+  if ((c === 96 || c === 126) && fenceStart(line)) return true;
+  if ((c === 42 || c === 45 || c === 95) && isThematic(line)) return true;
+  if (c === 62 && quoteLine(line) !== null) return true;
+  if ((c === 42 || c === 45 || c === 43 || isDigit(c)) && listStart(line)) return true;
+  if (c === 60 && isHtmlBlockStart(line)) return true;
+  return i + 1 < lines.length && setextLevel(lines[i + 1]);
 }
 
 function startsParagraphBlock(lines, i, inListItem = false) {
-  const list = listStart(lines[i]);
+  const line = lines[i];
+  const c = line.charCodeAt(leadingSpaces(line));
+  const list = c === 42 || c === 45 || c === 43 || isDigit(c) ? listStart(line) : null;
   if (list && !lines[i].slice(list.contentIndent).trim()) return false;
-  if (isStandaloneInlineTag(lines[i])) return false;
+  if (c === 60 && isStandaloneInlineTag(line)) return false;
   if (list && list.ordered && list.start !== 1 && !inListItem) return atxHeading(lines[i]) || fenceStart(lines[i]) || isThematic(lines[i]) || quoteLine(lines[i]) !== null || isIndentedCode(lines[i]) || isHtmlBlockStart(lines[i]);
   return startsBlock(lines, i);
 }
