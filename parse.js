@@ -100,20 +100,13 @@ function stripFenceContent(line, count, baseIndent) {
 }
 
 function splitLines(markdown) {
-  const source = String(markdown);
-  const lines = [];
-  let start = 0;
-  for (let i = 0; i < source.length; i++) {
-    if (source[i] === '\r' || source[i] === '\n') {
-      lines.push(source.slice(start, i));
-      if (source[i] === '\r' && source[i + 1] === '\n') i++;
-      start = i + 1;
-    }
+  let normalized = String(markdown);
+  if (normalized.indexOf('\r') !== -1) {
+    normalized = normalized.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
   }
-  if (start < source.length) lines.push(source.slice(start));
-  else if (source.length && (source[source.length - 1] === '\n' || source[source.length - 1] === '\r')) lines.push('');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return lines;
+  const result = normalized.split('\n');
+  if (result[result.length - 1] === '') result.length--;
+  return result;
 }
 
 function trimAscii(text) {
@@ -518,19 +511,24 @@ function startsParagraphBlock(lines, i, inListItem = false) {
 }
 
 function atxHeading(line) {
-  let i = 0;
-  while (i < line.length && i < 3 && line[i] === ' ') i++;
-  const hashStart = i;
-  while (i < line.length && line[i] === '#') i++;
-  const level = i - hashStart;
-  if (level < 1 || level > 6 || (line[i] && line[i] !== ' ' && line[i] !== '\t')) return null;
-  let text = trimAscii(line.slice(i));
-  let end = text.length;
-  while (end > 0 && (text[end - 1] === ' ' || text[end - 1] === '\t')) end--;
-  let hash = end;
-  while (hash > 0 && text[hash - 1] === '#') hash--;
-  if (hash < end && (hash === 0 || text[hash - 1] === ' ' || text[hash - 1] === '\t')) text = trimAscii(text.slice(0, hash));
-  return { level, text };
+  let markerStart = 0;
+  for (; markerStart < 3 && line.charCodeAt(markerStart) === 32; markerStart++);
+  let contentStart = markerStart;
+  while (line.charCodeAt(contentStart) === 35) contentStart++;
+  const depth = contentStart - markerStart;
+  if (depth === 0 || depth > 6) return null;
+  if (contentStart < line.length && line.charCodeAt(contentStart) !== 32 && line.charCodeAt(contentStart) !== 9) return null;
+
+  let contentEnd = line.length;
+  while (contentStart < contentEnd && (line.charCodeAt(contentStart) === 32 || line.charCodeAt(contentStart) === 9)) contentStart++;
+  while (contentEnd > contentStart && (line.charCodeAt(contentEnd - 1) === 32 || line.charCodeAt(contentEnd - 1) === 9)) contentEnd--;
+  let closingStart = contentEnd;
+  while (closingStart > contentStart && line.charCodeAt(closingStart - 1) === 35) closingStart--;
+  if (closingStart < contentEnd && (closingStart === contentStart || line.charCodeAt(closingStart - 1) === 32 || line.charCodeAt(closingStart - 1) === 9)) {
+    contentEnd = closingStart;
+    while (contentEnd > contentStart && (line.charCodeAt(contentEnd - 1) === 32 || line.charCodeAt(contentEnd - 1) === 9)) contentEnd--;
+  }
+  return { level: depth, text: line.slice(contentStart, contentEnd) };
 }
 
 function setextLevel(line) {
