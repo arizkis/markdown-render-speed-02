@@ -733,7 +733,9 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
         }
         item.push(value);
       }
-      else if (!startsBlock(lines, i) || (isIndentedCode(lines[i]) && indentColumns(lines[i]) < first.indent + 4)) item.push(lines[i].trimStart());
+      else if (!startsBlock(lines, i) || (isIndentedCode(lines[i]) && indentColumns(lines[i]) < first.indent + 4)) {
+        item.push(item[0] && indentColumns(lines[i]) < 4 ? lines[i] : lines[i].trimStart());
+      }
       else break;
       i++;
     }
