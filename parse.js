@@ -680,6 +680,7 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
     item.contentIndent = marker.contentIndent;
     item.baseIndent = baseIndent + marker.contentIndent;
     item.nestedContentIndent = marker.contentIndent;
+    item.nestedMarkerIndent = Infinity;
     item.hasNestedMarker = false;
     items.push(item);
     i++;
@@ -765,7 +766,10 @@ function renderList(lines, start, refs, first, baseIndent = 0) {
         continue;
       }
       if (nestedMarker) {
-        if (!item.hasNestedMarker) item.nestedContentIndent = next.contentIndent;
+        if (next.indent <= item.nestedMarkerIndent) {
+          item.nestedMarkerIndent = next.indent;
+          item.nestedContentIndent = next.contentIndent;
+        }
         item.hasNestedMarker = true;
       }
       if (indentColumns(lines[i]) >= item.contentIndent) {
