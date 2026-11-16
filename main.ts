@@ -2,16 +2,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse } from './parse.js';
 
-const inputPath = process.env.INPUT_CASES || process.argv[2] || path.join(process.env.MAKEFUN_INPUT_DIR || '/input', 'cases.json');
-const outputPath = process.env.OUTPUT_HTML || process.argv[3] || path.join(process.env.MAKEFUN_OUTPUT_DIR || '/output', 'html.json');
-const raw = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-const cases = Array.isArray(raw) ? raw : Object.values(raw.cases ?? raw);
-if (!Array.isArray(cases)) throw new Error('input must be an array of cases');
-
-const html = [];
-for (const item of cases) {
-  html.push(parse(typeof item === 'string' ? item : item?.markdown ?? ''));
+function readInputs(filename) {
+  const document = JSON.parse(fs.readFileSync(filename, { encoding: 'utf8' }));
+  if (Array.isArray(document)) return document;
+  return Object.values(document.cases ?? document);
 }
 
-fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-fs.writeFileSync(outputPath, JSON.stringify(html));
+function renderInput(item) {
+  const markdown = typeof item === 'string' ? item : item?.markdown ?? '';
+  return parse(markdown);
+}
+
+function run() {
+  const inputDirectory = process.env.MAKEFUN_INPUT_DIR || '/input';
+  const outputDirectory = process.env.MAKEFUN_OUTPUT_DIR || '/output';
+  const sourceFile = process.env.INPUT_CASES || process.argv[2] || path.resolve(inputDirectory, 'cases.json');
+  const destinationFile = process.env.OUTPUT_HTML || process.argv[3] || path.resolve(outputDirectory, 'html.json');
+  const renderedCases = readInputs(sourceFile).map(renderInput);
+  fs.mkdirSync(path.dirname(destinationFile), { recursive: true });
+  fs.writeFileSync(destinationFile, JSON.stringify(renderedCases));
+}
+
+run();

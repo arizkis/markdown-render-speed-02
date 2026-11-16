@@ -64,51 +64,34 @@ function indentColumns(line) {
 }
 
 function stripIndent(line, count, retainTabs = false) {
-  const requested = count;
-  let i = 0;
-  let column = 0;
-  let prefix = '';
-  while (i < line.length && count > 0) {
-    if (line[i] === '\t') {
-      const width = 4 - (column % 4);
-      if (count >= width) { count -= width; column += width; i++; }
-      else { prefix += ' '.repeat(width - count); count = 0; i++; }
-    }
-    else if (line[i] === ' ') { count--; column++; i++; }
-    else break;
-  }
-  let rest = line.slice(i);
-  if (!retainTabs && requested > 0 && line[0] === '\t' && rest[0] === '\t') rest = '  ' + rest.slice(1);
-  return prefix + rest;
+  return removeIndentation(line, count, 0, false, !retainTabs);
 }
 
 function stripFencedIndent(line, count, baseIndent) {
-  let i = 0;
-  let column = baseIndent;
-  let remaining = count;
-  let prefix = '';
-  while (i < line.length && remaining > 0) {
-    if (line[i] === ' ') { remaining--; column++; i++; }
-    else if (line[i] === '\t') {
-      const width = 4 - (column % 4);
-      if (remaining >= width) { remaining -= width; column += width; i++; }
-      else { prefix += ' '.repeat(width - remaining); remaining = 0; column += width; i++; }
-    } else break;
+  return removeIndentation(line, count, baseIndent, true, false);
+}
+
+function removeIndentation(source, requested, origin, expandRemainder, listTabs) {
+  let position = 0;
+  let column = origin;
+  let toRemove = requested;
+  let spacesToKeep = 0;
+  while (position < source.length) {
+    const character = source.charCodeAt(position);
+    if (character !== 32 && character !== 9) break;
+    if (toRemove <= 0 && !expandRemainder) break;
+    const width = character === 9 ? 4 - (column & 3) : 1;
+    const removed = Math.min(Math.max(toRemove, 0), width);
+    toRemove -= removed;
+    spacesToKeep += width - removed;
+    column += width;
+    position++;
   }
-  let end = i;
-  let leading = '';
-  while (end < line.length && (line[end] === ' ' || line[end] === '\t')) {
-    if (line[end] === '\t') {
-      const width = 4 - (column % 4);
-      leading += ' '.repeat(width);
-      column += width;
-    } else {
-      leading += ' ';
-      column++;
-    }
-    end++;
+  let suffix = source.slice(position);
+  if (listTabs && requested > 0 && source.charCodeAt(0) === 9 && suffix.charCodeAt(0) === 9) {
+    suffix = '  ' + suffix.slice(1);
   }
-  return prefix + leading + line.slice(end);
+  return spacesToKeep === 0 ? suffix : ' '.repeat(spacesToKeep) + suffix;
 }
 
 function stripFenceContent(line, count, baseIndent) {
