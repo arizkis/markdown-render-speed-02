@@ -1056,40 +1056,54 @@ function isTableDelimiter(line) {
 }
 
 function renderTable(lines, start, refs) {
-  if (!lines[start].includes('|') || !lines[start + 1].includes('|')) return null;
-  const headers = tableCells(lines[start]);
-  const delimiter = tableCells(lines[start + 1]);
-  if (!headers.length || headers.length !== delimiter.length) return null;
+  const headingLine = lines[start];
+  const alignmentLine = lines[start + 1];
+  if (headingLine.indexOf('|') < 0 || alignmentLine.indexOf('|') < 0) return null;
+  const headingCells = tableCells(headingLine);
+  const alignmentCells = tableCells(alignmentLine);
+  const width = headingCells.length;
+  if (width === 0 || alignmentCells.length !== width) return null;
+
+  let cursor = start + 2;
   if (refs[COLLECT_REFS]) {
-    let i = start + 2;
-    while (i < lines.length && tableBodyContinues(lines, i)) i++;
-    return { html: '', next: i };
+    for (; cursor < lines.length && tableBodyContinues(lines, cursor); cursor++);
+    return { next: cursor, html: '' };
   }
-  const aligns = [];
-  for (const cell of delimiter) {
-    const s = cell.trim();
-    aligns.push(s[0] === ':' && s[s.length - 1] === ':' ? 'center' : s[s.length - 1] === ':' ? 'right' : s[0] === ':' ? 'left' : '');
+
+  const attributes = new Array(width);
+  for (let column = 0; column < width; column++) {
+    const marker = alignmentCells[column].trim();
+    const left = marker.charCodeAt(0) === 58;
+    const right = marker.charCodeAt(marker.length - 1) === 58;
+    let alignment = '';
+    if (left) alignment = right ? 'center' : 'left';
+    else if (right) alignment = 'right';
+    attributes[column] = alignment ? ` align="${alignment}"` : '';
   }
-  const tagRow = (cells, tag) => {
-    const out = ['<tr>\n'];
-    for (let n = 0; n < headers.length; n++) {
-      const value = trimAscii(cells[n] ?? '').replaceAll('\\|', '|');
-      const align = aligns[n] ? ` align="${aligns[n]}"` : '';
-      out.push(`<${tag}${align}>${renderInline(value, refs)}</${tag}>\n`);
+
+  const fragments = ['<table>\n<thead>\n'];
+  appendTableRow(fragments, headingCells, attributes, 'th', refs);
+  fragments.push('</thead>\n');
+  let openedBody = false;
+  for (; cursor < lines.length && tableBodyContinues(lines, cursor); cursor++) {
+    if (!openedBody) {
+      fragments.push('<tbody>');
+      openedBody = true;
     }
-    out.push('</tr>\n');
-    return out.join('');
-  };
-  const out = ['<table>\n<thead>\n', tagRow(headers, 'th'), '</thead>\n'];
-  let i = start + 2;
-  const body = [];
-  while (i < lines.length && tableBodyContinues(lines, i)) {
-    body.push(tagRow(tableCells(lines[i]), 'td'));
-    i++;
+    appendTableRow(fragments, tableCells(lines[cursor]), attributes, 'td', refs);
   }
-  if (body.length) out.push('<tbody>' + body.join('') + '</tbody>');
-  out.push('</table>\n');
-  return { html: out.join(''), next: i };
+  if (openedBody) fragments.push('</tbody>');
+  fragments.push('</table>\n');
+  return { next: cursor, html: fragments.join('') };
+}
+
+function appendTableRow(fragments, cells, attributes, element, refs) {
+  fragments.push('<tr>\n');
+  for (let column = 0; column < attributes.length; column++) {
+    const content = trimAscii(cells[column] ?? '').replaceAll('\\|', '|');
+    fragments.push('<', element, attributes[column], '>', renderInline(content, refs), '</', element, '>\n');
+  }
+  fragments.push('</tr>\n');
 }
 
 function tableBodyContinues(lines, i) {
@@ -1099,16 +1113,22 @@ function tableBodyContinues(lines, i) {
 }
 
 function tableCells(line) {
-  const cells = [];
-  let start = 0;
-  for (let i = 0; i < line.length; i++) {
-    if (line[i] === '\\') { i++; continue; }
-    if (line[i] === '|') { cells.push(line.slice(start, i)); start = i + 1; }
+  const pieces = [];
+  let begin = 0;
+  let pipe = line.indexOf('|');
+  while (pipe !== -1) {
+    let escaped = false;
+    for (let before = pipe - 1; before >= begin && line.charCodeAt(before) === 92; before--) escaped = !escaped;
+    if (!escaped) {
+      pieces.push(line.slice(begin, pipe));
+      begin = pipe + 1;
+    }
+    pipe = line.indexOf('|', pipe + 1);
   }
-  cells.push(line.slice(start));
-  if (cells.length > 1 && cells[0].trim() === '') cells.shift();
-  if (cells.length > 1 && cells[cells.length - 1].trim() === '') cells.pop();
-  return cells;
+  pieces.push(line.slice(begin));
+  if (pieces.length > 1 && !pieces[0].trim()) pieces.shift();
+  if (pieces.length > 1 && !pieces[pieces.length - 1].trim()) pieces.pop();
+  return pieces;
 }
 
 function findStrikeClose(text, start, refs) {
