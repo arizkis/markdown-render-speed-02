@@ -1040,20 +1040,10 @@ function tableBodyContinues(lines, i) {
 
 function tableCells(line) {
   const cells = [];
-  let start = 0, codeTicks = 0;
+  let start = 0;
   for (let i = 0; i < line.length; i++) {
     if (line[i] === '\\') { i++; continue; }
-    if (line[i] === '`') {
-      let run = 1;
-      while (line[i + run] === '`') run++;
-      if (codeTicks === 0) {
-        if (findCodeClosing(line, i + run, '`'.repeat(run)) >= 0) codeTicks = run;
-      }
-      else if (codeTicks === run) codeTicks = 0;
-      i += run - 1;
-      continue;
-    }
-    if (line[i] === '|' && codeTicks === 0) { cells.push(line.slice(start, i)); start = i + 1; }
+    if (line[i] === '|') { cells.push(line.slice(start, i)); start = i + 1; }
   }
   cells.push(line.slice(start));
   if (cells.length > 1 && cells[0].trim() === '') cells.shift();
