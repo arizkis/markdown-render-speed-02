@@ -1458,12 +1458,22 @@ function labelHasMarkdownLink(label, refs) {
 
 function findLabelClose(text, open) {
   let depth = 1;
+  let literalLongRun = false;
   for (let i = open + 1; i < text.length; i++) {
     if (text[i] === '\\') { i++; continue; }
     if (text[i] === '`') {
       let count = delimiterRunLength(text, i, '`');
       const close = findCodeClosing(text, i + count, '`'.repeat(count));
-      if (close >= 0) { i = close + count - 1; continue; }
+      if (count > 1) {
+        const bracket = text.indexOf(']', i + count);
+        if (close < 0 || (bracket >= 0 && bracket < close && (text[bracket + 1] === '(' || text[bracket + 1] === '['))) literalLongRun = true;
+      }
+      if (!literalLongRun && close >= 0) {
+        i = close + count - 1;
+        continue;
+      }
+      i += count - 1;
+      continue;
     }
     if (text[i] === '<') {
       const end = inlineTagEnd(text, i);
